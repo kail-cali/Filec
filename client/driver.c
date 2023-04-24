@@ -45,7 +45,7 @@ typedef struct Context {
     char inet[16];
     
     struct Driver* driver;
-    struct sockaddr_in* client_addr;
+    struct sockaddr_in client_addr;
 
 } Context;
 
@@ -55,7 +55,7 @@ typedef struct Driver {
     int run_forever ;
     char history[1024];
     int check;
-    JobQueue* job_queue;
+    JobQueue job_queue;
 
 } Driver;
 /*--------------------------*/
@@ -102,7 +102,7 @@ static int bsem_init(BinSemaphore* bsem_p, int value){
     return 0;
 }
 
-static void bsem_switch(BinSemaphore* bsem_p){
+static void bsem_post(BinSemaphore* bsem_p){
     pthread_mutex_lock(&bsem_p->mutex);
     bsem_p->v = 1;
     pthread_cond_signal(&bsem_p->cond);
@@ -175,54 +175,62 @@ static struct Job* pop(JobQueue* job_queue_p){
 
 static int _stream_init(Context*** thread_p){
   //  printf("stream debug : %d\n", (**thread_p)->id);
-    
-    (**thread_p)->port =32209;
+    Context* context_p = (**thread_p);
+    context_p->port = 32209;
     char* tmp = "127.0.0.1";
     for (int i=0; i< strlen(tmp); i++){
-        (**thread_p)->inet[i] = tmp[i]; 
+        context_p->inet[i]= tmp[i];
     }
     int client_fd;
-
-    (**thread_p)->client_addr = (struct sockaddr_in* )malloc(sizeof(struct sockaddr_in* ));
-    if((**thread_p)->client_addr == NULL){
-        printf("addr allocation failed");
-        return -1;
-    }
-    if ((client_fd = socket(AF_INET, SOCK_STREAM, 0))< 0 ){
+    int stream;
+    if ((context_p->fd = socket(AF_INET, SOCK_STREAM, 0))< 0 ){
         printf("Socket creation error\n");
         return -1;
 
     }
-    (**thread_p) -> fd = client_fd;
-    (**thread_p)->client_addr->sin_family = AF_INET;
-    (**thread_p)->client_addr->sin_port= htons((**thread_p)->port);
-    if (inet_pton(AF_INET, (**thread_p)->inet, &(**thread_p)->client_addr->sin_addr)<=0){
-        err("_stream_init(): bind failed, invalid address\n");
+    context_p->client_addr.sin_family = AF_INET;
+    context_p->client_addr.sin_port = htons(context_p->port);
+    if (inet_pton(AF_INET, context_p ->inet, &(context_p->client_addr.sin_addr))<= 0){
+        err("_stream_init(): bind failed, invalid addrees\n");
+    }
+    stream = connect(context_p->fd, (struct sockaddr* )&(context_p->client_addr), sizeof(context_p->client_addr));
+    if (stream < 0){
+        err("_stream_init(): connection failed\n");
         return -1;
-    } 
+    }
+//    context_p->fd = client_fd;
     return 0;
 }
 /*after context craeted, make stream in context, and give fd to context_thread*/
 
+static void* test_context_do(struct Context* thread_p){
+    char debug[17]= {0};
+    char read_buffer[1024]= {0};
 
+    
+    printf("TEST:: test_context_do\n");
+    snprintf(debug, 17, "context-%d", thread_p->id);
+    Driver* driver_p = thread_p->driver;
+    int valread;
+    printf("msg to send from client:: %s \n", debug);
+    send(thread_p->fd, debug, strlen(debug),0);
+    valread = read(thread_p->fd, read_buffer, 1024);
+    printf("\nrevv :: %s \n", read_buffer);
+
+
+}
 
 static void* context_do(struct Context* thread_p){
     /*fn for processing thread, same as excutor*/
     char debug_[17]= {0};
     snprintf(debug_, 17, "context-%d", thread_p->id);
-    Driver* driver = thread_p->driver;
-    int stream, valread;
-    
-    char buffer[1024]= {0};
-    if (stream=connect(thread_p->fd, (struct sockaddr* )&thread_p->client_addr, sizeof(thread_p->client_addr))<0){
-            err("Connect Error in context_do\n");
-    }
+    Driver* driver_p = thread_p->driver;
 
     while (SERVICE_KEEPALIVE){
-        // need wait until query recv
         // wait();
-        wait(driver->job_queue->has_job);
-        if (SERVICE_KEEPALIVE && stream >=0){
+        //
+        wait(driver_p->job_queue.has_job);
+        if (SERVICE_KEEPALIVE && thread_p->fd >=0){
             //send(thread_p->client_fd, )
             continue;
         }
@@ -247,13 +255,17 @@ int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
     new_job->args = args_p;
     Driver* driver_p = driver;
 
-    push(driver_p->job_queue, new_job);
+    push(&driver_p->job_queue, new_job);
 
     return 0;
 }
 
 static int sample(Driver* driver){
     int i ; 
+    FILE *fptr;
+    fptr = fopen("./client/search_history.txt", "r");
+
+
     for (i=0; i<10; i++){
         add_query(driver, request_query, (void*)(uintptr_t)i);
                     
@@ -284,15 +296,14 @@ static int context_init(Driver* driver, struct Context** thread_p, int id){
     (*thread_p)->id = id;
 
     if (_stream_init(&thread_p) <0){
-        err("|_stream_init(): error");
+        err("|_stream_init(): error\n");
+        return -1;
     }
-
-    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
+    
+    printf("create context on thread\n");
+    //pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
+    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) test_context_do, (*thread_p));
     pthread_detach((*thread_p)->pthread);
-    /*
-    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) thread_do, (*thread_p));
-    pthread_detach((*thread_p)->pthread);
-    */
     return 0;
 
 }
@@ -307,7 +318,13 @@ struct Driver* driver_init(int num_context){
         err("driver_init(): Could not allocate memory for driver\n");
         return NULL;
     }
-    driver->check = 1;
+    
+    if (job_queue_init(&driver->job_queue)<0){
+        err("driver_init(): could not allocate moemory for job queue");
+            
+        free(driver);
+        return NULL;
+    }
 
     /*make child thread(same as context) */
     driver->contexts = (struct Context** )malloc(num_context * sizeof(struct Context* ));
@@ -326,21 +343,33 @@ struct Driver* driver_init(int num_context){
     printf("Debug:: context port %d\n", driver->contexts[0]->port );
     printf("Debug:: context thread id%ld\n", driver->contexts[0]->pthread);
     printf("Debug:: context inet %s\n", driver->contexts[0]->inet);
-    //char inet[dd15];
     return driver;
 }
 
 // currently single Context thread is forced
+/*
+static int flush(Driver* driver_p){
+    if (driver_p){
 
+        if (driver_p->job_queue){
+            free(driver_p->job_queue);
+        }
+        
 
+        for (int i=0; i<driver_p->num_context;i++){
+            continue;
+        }
+        free(driver_p);
+        
+    }
 
+}
+*/
 int main(){
     Driver* driver  = driver_init(1);
-    driver -> run_forever = 0; 
-    printf("all done:driver %d allocated at \n", driver->check);
+//    printf("all done:driver %d allocated at \n", driver->check);
     printf("runing \n");
-    char buffer[1024];
-    while (driver->run_forever==0){
+    while (SERVICE_KEEPALIVE){
         continue;
         /*
         printf("Querry input::\n ");

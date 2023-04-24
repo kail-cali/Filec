@@ -24,6 +24,29 @@ typedef struct Control{
     int inet;
 } Control;
 
+
+typedef struct HashItem{
+    char* key;
+    char* value;
+
+} HashItem;
+
+typedef struct FileHash{
+    HashItem** items;
+    int size;
+    int len;
+
+
+} FileHash;
+
+typedef struct Session{
+    uintptr_t session_iid;
+    int worker_id;
+    char read_buffer[1024];
+    int varlead_status;
+    
+} Session;
+
 typedef struct BinSemaphore{
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -34,7 +57,7 @@ typedef struct Job{
     struct Job* prev;
     void (*function )(void* args);
     void* args;
-
+    Session* info;
 } Job;
 
 typedef struct JobQueue{
@@ -89,6 +112,9 @@ struct Worker;
 
 static int worker_init(Cluster* cluster, struct Worker** thread_p, int id);
 
+static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p );
+
+void task_fn(void* args);
 /*--------------------------*/
 
 static void bsem_init(BinSemaphore* bsem_p, int value){
@@ -201,53 +227,167 @@ static struct Job*  pop(JobQueue* job_queue_p){
 
 
 static void* worker_do(Worker* thread_p){
-//wait 
     char worker_name[16] = {0};
     snprintf(worker_name, 16, "worker-%d", thread_p->id);
     Cluster* cluster_p = thread_p->cluster;
     
+    pthread_mutex_lock(&cluster_p->lock);
+    cluster_p->num_alive_worker +=1;
+    pthread_mutex_unlock(&cluster_p->lock);
+
+    while (SERVICE_KEEPALIVE) {
+        wait(cluster_p->job_queue.has_job);
+        if (SERVICE_KEEPALIVE){
+
+            pthread_mutex_lock(&cluster_p->lock);
+            cluster_p->num_working_worker +=1;
+            pthread_mutex_unlock(&cluster_p->lock);
+
+
+
+            void(* fn_buf)(void* );
+            void* args_buf;
+            Job* job_p = pop(&cluster_p->job_queue);
+            if (job_p){
+                fn_buf = job_p->function;
+                //args_buf = job_p->args;
+                args_buf = job_p->info;
+                fn_buf(args_buf);
+                
+                
+                free(job_p->info);
+                free(job_p);
+                printf("--at work thread -- job done\n");
+            }
+            /*temporerly give latnecy*/
+            printf("sleep - latnecy::thraed name %s \n", worker_name);
+            sleep(10);
+            printf("wake up- latnecy::thraed name %s \n", worker_name);
+            /*delete later */
+        }
+        
+        pthread_mutex_lock(&cluster_p->lock);
+        cluster_p->num_working_worker -= 1;
+        pthread_mutex_unlock(&cluster_p->lock);
+    
+    }
+
+    pthread_mutex_lock(&cluster_p->lock);
+    cluster_p->num_alive_worker -= 1;
+    pthread_mutex_unlock(&cluster_p->lock);
+    return NULL;
     
 }
 
+
+
+static void* test_cluster_do(Cluster* cluster){
+
+    int new_session;
+    int socklen = sizeof(cluster->serv_addr);
+    printf("TEST:: cluster test connections statsus %d \n", cluster->connection);
+    printf("--debug-cluster do : fd %d\n ", cluster->server_fd);
+//    new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), (socklen_t* )&(cluster->serv_addr));
+    new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), &socklen);
+    printf("--debug-cluster-new_session: %d\n", new_session); 
+    
+    int valread;
+    char file_context[1024] = {0};
+    snprintf(file_context,1024 ,"./tmp/loc");
+    char buffer[1024] = {0};
+
+    valread = read(new_session, buffer, 1024);
+    printf("recved from client ::: %s\n", buffer);
+    send(new_session, file_context, strlen(file_context), 0);
+    printf("Hello message sent\n");
+
+}
 
 static void* cluster_do(Cluster* cluster){
     int new_session;
-    printf("cluster do connection (%d)\n", cluster->connection);
-    // open connection
+    int session_len = sizeof(cluster->serv_addr);
+
+    printf("Cluster do connection status(%d)\n", cluster->connection);
     while (cluster->connection ){
-        // call back?
-        new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), (socklen_t* )(sizeof(cluster->serv_addr )));
+        /* create session */
+        new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), &session_len);
         if (new_session <0){
-                err("Accept error found\n");
+            err("cluster- Accept error found\n");
         }
 
+        /*create and submit session to job queue */
+        submit(cluster, task_fn, (void* )(uintptr_t)new_session);
+        
+        printf("new session created {%d}\n", new_session);
 
-        // push(new_session, new_job ) to jobqueue
-        // new_session = -1;
 
     }
     
 }
 
-
-
-
-
-static int add_work(Cluster* cluster_p, void (*function_p)(void* ), void* args_p){
+static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
+    /*mapping session and schedule at job queue */
     Job* new_job;
+ 
+    
     new_job = (struct Job* )malloc(sizeof(struct Job));
     if (new_job==NULL){
-        err("add work():: could not allocate memory for new job \n");
+        err("at submit():: could not allocate memory for new job\n");
         return -1;
     }
+         
+    /*map session */
+    Session* session_info;
+    session_info = (struct Session* )malloc(sizeof(struct Session));
+    if (session_info ==NULL){
+    
+        err("at submit():: could not allocate memory for new session\n");
+        return -1;
+    }
+    session_info->session_iid = (uintptr_t) args_p;
+    session_info->varlead_status;
+    
+    printf("--debug--submit :: session allocation\n");
+    
+    /*process task at function */
+     
     new_job->function = function_p;
-    new_job->args = args_p;
-
-    push(&cluster_p->job_queue,new_job);
-
+    new_job->args = args_p ;
+    new_job->info = session_info;
+    
+    push(&cluster_p->job_queue, new_job);
     return 0;
+
 }
 
+void task_fn(void* args){
+    /*procceing session :: read find write send */
+
+    printf("Thread #%u working on %ld\n", (int)pthread_self(), (uintptr_t) args);
+    
+   /*plain code  
+    uintptr_t new_session = (uintptr_t) args;
+    int valread;
+    char file_context[1024] = {0};
+    snprintf(file_context, 1024, "./tmp/loc");
+    char buffer[1024] = {0};
+
+    valread = read(new_session, buffer, 1024);
+    printf("recved from client :: %s \n", buffer);
+    send(new_session, file_context, strlen(file_context),0);
+    */
+    /*poly code*/
+    printf("--in task_fn -- poly code with session class\n ");
+    Session* session_p = (Session* )args;
+    session_p->varlead_status = read(session_p->session_iid, session_p->read_buffer, 1024);
+    
+    printf("recved from client :: %s \n", session_p->read_buffer);
+    /*find file*/
+    char find_file_loc[1024] = {0};
+    
+    snprintf(find_file_loc, 1024, "./tmp/loc/a.txt");
+    send(session_p->session_iid, find_file_loc, strlen(find_file_loc),0);
+}
 
 
 static int worker_init(Cluster* cluster, struct Worker** thread_p, int id){
@@ -359,6 +499,9 @@ int main(){
     Cluster* cluster = cluster_init(10);
     /*stream processing start here */
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
+
+    //pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) test_cluster_do, cluster);
+
     pthread_detach(cluster->main_thread);
 
     while ( SERVICE_KEEPALIVE){
