@@ -9,7 +9,26 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+
 #define err(str) fprintf(stderr, str)
+
+/*client code*/
+/*----data structure------*/
+
+
+
+typedef struct Json{
+    int session_id;
+    int id;
+    int len;
+    int req_ts;
+    int processed_ts;
+    char book[255];
+    int cat;
+
+    
+} Json;
+
 
 /*-----class*/
 
@@ -26,6 +45,8 @@ typedef struct Job{
     struct Job* prev;
     void (*function)(void* args);
     void* args;
+    Json* query;
+
 
 } Job;
 
@@ -74,6 +95,7 @@ static int job_queue_init(JobQueue* job_queue_p);
 
 static volatile int SERVICE_KEEPALIVE;
 /*-------------------------*/
+
 
 
 static int job_queue_init(JobQueue* job_queue_p){
@@ -143,8 +165,7 @@ static void push(JobQueue* job_queue_p, struct Job* new_job){
 
     
     job_queue_p->len ++;
-    
-   // bsme_on()
+    bsem_post(job_queue_p->has_job);    
     pthread_mutex_unlock(&job_queue_p->rmutex);
 }
 
@@ -154,20 +175,21 @@ static struct Job* pop(JobQueue* job_queue_p){
     pthread_mutex_lock(&job_queue_p->rmutex);
 
     Job* job_p = job_queue_p->front;
-
-    if (job_queue_p->len==1){
+    
+    if (job_queue_p->len==0){
+    }
+    else if (job_queue_p->len==1){
         job_queue_p->front = NULL;
         job_queue_p->rear = NULL;
+        job_queue_p->len=0;
 
     }
-    if (job_queue_p->len>=2){
+    else if (job_queue_p->len>=2){
         job_queue_p->front = job_p->prev;
-
+        job_queue_p->len --;
+        bsem_post(job_queue_p->has_job);
     }
     
-    if (job_queue_p->len>0){
-        job_queue_p->len --;
-    }
     pthread_mutex_unlock(&job_queue_p->rmutex);
     return job_p;
 }
@@ -215,9 +237,15 @@ static void* test_context_do(struct Context* thread_p){
     printf("msg to send from client:: %s \n", debug);
     send(thread_p->fd, debug, strlen(debug),0);
     valread = read(thread_p->fd, read_buffer, 1024);
-    printf("\nrevv :: %s \n", read_buffer);
+    printf("test-recv :: %s \n", read_buffer);
 
 
+}
+static int _set_session(Context* context_p, Json* query){
+    query-> session_id = context_p->fd;
+    query -> id = context_p->id;
+    query -> processed_ts = 12;
+    return 0;
 }
 
 static void* context_do(struct Context* thread_p){
@@ -227,32 +255,68 @@ static void* context_do(struct Context* thread_p){
     Driver* driver_p = thread_p->driver;
 
     while (SERVICE_KEEPALIVE){
-        // wait();
-        //
         wait(driver_p->job_queue.has_job);
         if (SERVICE_KEEPALIVE && thread_p->fd >=0){
             //send(thread_p->client_fd, )
-            continue;
+            void(* fn)(void* );
+            void* args;
+            Job* job_p = pop(&driver_p->job_queue);
+            if(job_p){
+                fn = job_p->function;
+                _set_session(thread_p, job_p->query);    
+                args = job_p->query;
+                fn(args);
+
+                free(job_p->query);
+                free(job_p);
+               // printf("debug-- context thread -- job done\n");
+            }
+
         }
 
     }
+    close(thread_p->fd);
 }
 
 
-void request_query(void* args){
-    
+void request(void* args){
+    int valread;
+    Json* query = (Json* )args;
+    char txt_file[1024];
+    printf("Thread #%u working on  book name (%s)\n", (int)pthread_self(), query->book );
+    send(query->session_id, query->book, query->len, 0);
+    printf("debug--send done from thread[%u] \n", (int)pthread_self());
+    valread = read(query->session_id, txt_file, 1024);
+    printf("debug--recv(%s) done from thread[%u] \n", txt_file,(int)pthread_self());
 
 }
 
-int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
+
+static int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
     Job* new_job;
+    Json* query;
+
     new_job = (struct Job*)malloc(sizeof(struct Job));
     if (new_job==NULL){
+        err("at add_query():: could not allocated new job on memory");
         return -1;
 
     }
+
+    query = (struct Json* )malloc(sizeof(struct Json));
+
+    if (query ==NULL){
+        err("at add_query():: could not allocated json on memory");
+        return -1;
+    }
+    strcpy( query->book, (char* )args_p);
+
+    query->req_ts = 10; 
+    query->len = strlen(query->book);
+
+
     new_job->function =function_p;
-    new_job->args = args_p;
+    new_job->query = query;
     Driver* driver_p = driver;
 
     push(&driver_p->job_queue, new_job);
@@ -260,17 +324,31 @@ int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
     return 0;
 }
 
+
+
 static int sample(Driver* driver){
+    printf("TEST:: Sample query\n ");
     int i ; 
     FILE *fptr;
-    fptr = fopen("./client/search_history.txt", "r");
+    int done;   
+    char buf[50];
 
 
-    for (i=0; i<10; i++){
-        add_query(driver, request_query, (void*)(uintptr_t)i);
-                    
-    }
+    fptr = fopen("./client/search_history.txt", "a+");
 
+    while ( fscanf(fptr, "%s", buf)==1 )
+        if (i < 10){
+            done =  add_query(driver, request, (void* )(char* )buf);
+            /*
+            if (done >=0){
+                 printf("done: txt(%ld):: %s\n",sizeof(buf), buf);
+            }
+            */
+        i+=1;
+        }
+        
+    
+    fclose(fptr);
     return 0;
 }
 
@@ -301,8 +379,8 @@ static int context_init(Driver* driver, struct Context** thread_p, int id){
     }
     
     printf("create context on thread\n");
-    //pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
-    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) test_context_do, (*thread_p));
+    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
+   // pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) test_context_do, (*thread_p));
     pthread_detach((*thread_p)->pthread);
     return 0;
 
@@ -339,10 +417,7 @@ struct Driver* driver_init(int num_context){
         context_init(driver, &driver->contexts[n], n);
 
     }
-    printf("Debug:: context id  %d\n", driver->contexts[0]->id );
-    printf("Debug:: context port %d\n", driver->contexts[0]->port );
-    printf("Debug:: context thread id%ld\n", driver->contexts[0]->pthread);
-    printf("Debug:: context inet %s\n", driver->contexts[0]->inet);
+
     return driver;
 }
 
@@ -366,16 +441,13 @@ static int flush(Driver* driver_p){
 }
 */
 int main(){
-    Driver* driver  = driver_init(1);
-//    printf("all done:driver %d allocated at \n", driver->check);
-    printf("runing \n");
+    Driver* driver  = driver_init(10);
+    printf("--------------runing---------------- \n");
+    /*test code on sample */
+    sample(driver);
     while (SERVICE_KEEPALIVE){
         continue;
-        /*
-        printf("Querry input::\n ");
-        fgets(buffer, sizeof(buffer), stdin);
-        printf("file name is: %s", buffer);
-        */
     }
+    printf("-------------client end-------------\n");
     return 0;
 }

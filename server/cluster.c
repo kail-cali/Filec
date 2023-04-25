@@ -40,10 +40,13 @@ typedef struct FileHash{
 } FileHash;
 
 typedef struct Session{
+    pthread_mutex_t timed_t;
     uintptr_t session_iid;
     int worker_id;
+    struct timespec* timeout;
     char read_buffer[1024];
     int varlead_status;
+    int time_out_default;
     
 } Session;
 
@@ -207,19 +210,23 @@ static struct Job*  pop(JobQueue* job_queue_p){
     Job* front_job = job_queue_p->front;
 
     if (job_queue_p->len==0){
-        pthread_mutex_unlock(&job_queue_p->rmutex);
-        return NULL;
+        
+
+
     }
-    if (job_queue_p -> len==1){
+    else if (job_queue_p -> len==1){
         job_queue_p->front = NULL;
         job_queue_p->rear = NULL;
+        job_queue_p -> len = 0;
     }
-    if (job_queue_p->len >=2){
+    else if (job_queue_p->len >=2){
         job_queue_p->front = front_job->prev;
+        job_queue_p->len --;
+        bsem_post(job_queue_p->has_job);
+
     }
     
     
-    job_queue_p->len --;
     pthread_mutex_unlock(&job_queue_p->rmutex);
 
     return front_job;
@@ -228,7 +235,7 @@ static struct Job*  pop(JobQueue* job_queue_p){
 
 static void* worker_do(Worker* thread_p){
     char worker_name[16] = {0};
-    snprintf(worker_name, 16, "worker-%d", thread_p->id);
+    snprintf(worker_name, 16, "worker#%d", thread_p->id);
     Cluster* cluster_p = thread_p->cluster;
     
     pthread_mutex_lock(&cluster_p->lock);
@@ -260,9 +267,9 @@ static void* worker_do(Worker* thread_p){
                 printf("--at work thread -- job done\n");
             }
             /*temporerly give latnecy*/
-            printf("sleep - latnecy::thraed name %s \n", worker_name);
+            printf("sleep - latnecy::thraed[%s]  \n", worker_name);
             sleep(10);
-            printf("wake up- latnecy::thraed name %s \n", worker_name);
+            printf("wake up- latnecy::thraed[%s] \n", worker_name);
             /*delete later */
         }
         
@@ -347,8 +354,17 @@ static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
     session_info->session_iid = (uintptr_t) args_p;
     session_info->varlead_status;
     
-    printf("--debug--submit :: session allocation\n");
-    
+    pthread_mutex_init(&(session_info->timed_t), NULL);
+
+    session_info->timeout = (struct timespec* )malloc(sizeof(struct timespec ));
+    if (session_info->timeout==NULL){
+        err("at submit():: could not allocate memory for timeout");
+        return -1;
+    }
+    /*--<#>---------default value hard coding------------------   */
+    session_info->time_out_default = 90;
+
+
     /*process task at function */
      
     new_job->function = function_p;
@@ -362,31 +378,30 @@ static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
 
 void task_fn(void* args){
     /*procceing session :: read find write send */
-
-    printf("Thread #%u working on %ld\n", (int)pthread_self(), (uintptr_t) args);
+    int timeout;
     
-   /*plain code  
-    uintptr_t new_session = (uintptr_t) args;
-    int valread;
-    char file_context[1024] = {0};
-    snprintf(file_context, 1024, "./tmp/loc");
-    char buffer[1024] = {0};
-
-    valread = read(new_session, buffer, 1024);
-    printf("recved from client :: %s \n", buffer);
-    send(new_session, file_context, strlen(file_context),0);
-    */
-    /*poly code*/
-    printf("--in task_fn -- poly code with session class\n ");
     Session* session_p = (Session* )args;
-    session_p->varlead_status = read(session_p->session_iid, session_p->read_buffer, 1024);
+    session_p->timeout->tv_sec = session_p->time_out_default; // default 90s
     
-    printf("recved from client :: %s \n", session_p->read_buffer);
+    printf("Thread #%u working on %ld, || timeout setting (%ld)\n", (int)pthread_self(), (uintptr_t) args, session_p->timeout->tv_sec);
+//    timeout = pthread_mutex_timedlock(&(session_p->timed_t), session_p->timeout);
+    timeout = 0;
+    while (timeout==0){
+
+ 
+        session_p->varlead_status = read(session_p->session_iid, session_p->read_buffer, 1024);
+    
+        printf("recved from client :: %s \n", session_p->read_buffer);
     /*find file*/
-    char find_file_loc[1024] = {0};
+        char find_file_loc[1024] = {0};
     
-    snprintf(find_file_loc, 1024, "./tmp/loc/a.txt");
-    send(session_p->session_iid, find_file_loc, strlen(find_file_loc),0);
+        snprintf(find_file_loc, 1024, "./tmp/loc/a.txt");
+        send(session_p->session_iid, find_file_loc, strlen(find_file_loc),0);
+        printf("send msg to %ld \n", session_p->session_iid);
+        timeout = 1;
+    }
+    printf("---session time out----\n");
+    //close(session_p->session_iid);
 }
 
 
@@ -411,7 +426,7 @@ static int worker_init(Cluster* cluster, struct Worker** thread_p, int id){
 static int _stream_init(Cluster** cluster){
     Cluster* cluster_p = (*cluster);
     cluster_p->port = 32209;
-    int opt = 1;
+    int opt = 6;
     int server_fd;
 
     
@@ -491,7 +506,15 @@ struct Cluster* cluster_init(int num_worker){
 
 
 
+void flush(Cluster* cluster_p){
+    /*worker thread*/
+    for (int i=0; i < cluster_p->num_alive_worker; i++){
 
+       free( cluster_p -> workers[i]);
+    }
+
+
+}
 
 int main(){
     
@@ -509,5 +532,7 @@ int main(){
         continue;
 
         }
+    SERVICE_KEEPALIVE = 0;
+    printf("----Service Stop----");
     return 0;
 }
