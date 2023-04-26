@@ -11,7 +11,15 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <dirent.h>
 #define err(str) fprintf(stderr, str)
+
+
+
+#define max(a,b) (((a)<(b))?(a):(b))
+#define min(a,b) (((a)>(b))?(a):(b))
+
+
 
 static volatile int SERVICE_KEEPALIVE;
 
@@ -22,6 +30,10 @@ typedef struct Control{
     long start_time;
     int open_port; 
     int inet;
+    int num_lock;
+    int num_worker;
+    int timeout;
+    
 } Control;
 
 
@@ -35,9 +47,21 @@ typedef struct FileHash{
     HashItem** items;
     int size;
     int len;
+    DIR* os_fd;
+    struct dirent* connector;
 
+    /*tmp file dir tree */
+    char* file_path[30];
+    int file_len;
 
 } FileHash;
+
+
+
+typedef struct File{
+    char name[50];
+    char contents[255];
+} File;
 
 typedef struct Session{
     pthread_mutex_t timed_t;
@@ -70,6 +94,8 @@ typedef struct JobQueue{
 
     int len;
     BinSemaphore* has_job;
+    BinSemaphore** job_list;
+    int lock_cnt;
 
 } JobQueue;
 
@@ -79,6 +105,7 @@ typedef struct Worker{
     int id;
 
     struct Cluster* cluster;
+    int lock_idx;
 
     /*job*/
     int session;
@@ -101,7 +128,9 @@ typedef struct Cluster{
     struct sockaddr_in serv_addr;
     int port;
     char inet[16];
-    int connection;
+    int* connection;
+
+    FileHash* file_hash;
 
 
 } Cluster;
@@ -118,7 +147,52 @@ static int worker_init(Cluster* cluster, struct Worker** thread_p, int id);
 static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p );
 
 void task_fn(void* args);
+
+
+static void bsem_post(BinSemaphore* bsem_p);
+
+void test_task_fn(void* args);
+
+struct File* find_file(char* file_name);
 /*--------------------------*/
+
+
+static void bsem_list_init(BinSemaphore** bsem_list_p, int value){
+    
+    BinSemaphore* bsem_p = (*bsem_list_p);
+    pthread_mutex_init(&(bsem_p->mutex), NULL);
+    /*
+
+    pthread_mutex_init(&(bsem_p->mutex), NULL);
+    pthread_cond_init(&(bsem_p->cond),NULL);
+    bsem_p->v = value;
+*/
+
+}
+
+
+static void bsem_list_post(BinSemaphore** bsem_list_p){
+
+    BinSemaphore* bsem_p = (*bsem_list_p);
+    
+    pthread_mutex_lock(&bsem_p->mutex);
+    bsem_p -> v = 1;
+    pthread_cond_signal(&bsem_p->cond);
+    pthread_mutex_unlock(&bsem_p->mutex);
+}
+
+
+static void bsem_list_wait(BinSemaphore** bsem_list_p){
+    BinSemaphore* bsem_p = (*bsem_list_p);
+    pthread_mutex_lock(&bsem_p->mutex);
+    while (bsem_p->v != 1){
+        pthread_cond_wait(&bsem_p->cond, &bsem_p->mutex);
+    }
+    bsem_p->v = 0;
+    pthread_mutex_unlock(&bsem_p->mutex);
+}
+
+
 
 static void bsem_init(BinSemaphore* bsem_p, int value){
 
@@ -149,23 +223,13 @@ static void wait(BinSemaphore* bsem_p){
 }
 
 
-static void time_wait(BinSemaphore* bsem_p){
-    // not used, aren't fit at job -shedule function
-    pthread_mutex_lock(&bsem_p->mutex);
-    while (bsem_p->v != 1){
-        continue;
-//        pthread_cond_timedwait(&bsem_p->cond, &bsem_p->mutex, 30);
-    }
-    printf("time out,");
-}
-
 /*--------------------------*/
 
 static int job_queue_init(JobQueue* job_queue_p){
     job_queue_p->len =0;
     job_queue_p->front = NULL;
     job_queue_p->rear = NULL;
-    
+    job_queue_p->lock_cnt = 3; 
     job_queue_p->has_job = (struct BinSemaphore* )malloc(sizeof(struct BinSemaphore ));
     
     if (job_queue_p->has_job == NULL){
@@ -175,7 +239,21 @@ static int job_queue_init(JobQueue* job_queue_p){
     pthread_mutex_init(&(job_queue_p->rmutex), NULL);
     bsem_init(job_queue_p->has_job, 0);
     
+    // hard coding;
+    int num_lock;
+    num_lock = 3;
+    job_queue_p->job_list  = (struct BinSemaphore** )malloc(num_lock * sizeof(struct BinSemaphore *));
+    if (job_queue_p->job_list==NULL){
 
+        err("cluster_init():: allocatate job_list  on memory failed\n");
+        return -1;
+     }
+    
+    for (int i=0; i< 3; i++){
+        //bsem_list_init(&job_queue_p->job_list[i], 0);
+        continue;
+     }
+     
     return 0;
 }
 
@@ -256,15 +334,16 @@ static void* worker_do(Worker* thread_p){
             void* args_buf;
             Job* job_p = pop(&cluster_p->job_queue);
             if (job_p){
+                job_p->info->worker_id = thread_p->id; 
                 fn_buf = job_p->function;
                 //args_buf = job_p->args;
                 args_buf = job_p->info;
+                
                 fn_buf(args_buf);
                 
                 
                 free(job_p->info);
                 free(job_p);
-                printf("--at work thread -- job done\n");
             }
             /*temporerly give latnecy*/
             printf("sleep - latnecy::thraed[%s]  \n", worker_name);
@@ -289,33 +368,32 @@ static void* worker_do(Worker* thread_p){
 
 
 static void* test_cluster_do(Cluster* cluster){
-
+    printf("\n==TEST MODE==\n");
     int new_session;
-    int socklen = sizeof(cluster->serv_addr);
-    printf("TEST:: cluster test connections statsus %d \n", cluster->connection);
-    printf("--debug-cluster do : fd %d\n ", cluster->server_fd);
-//    new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), (socklen_t* )&(cluster->serv_addr));
-    new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), &socklen);
-    printf("--debug-cluster-new_session: %d\n", new_session); 
+    int session_len = sizeof(cluster->serv_addr);
     
-    int valread;
-    char file_context[1024] = {0};
-    snprintf(file_context,1024 ,"./tmp/loc");
-    char buffer[1024] = {0};
+    while (SERVICE_KEEPALIVE && cluster->server_fd >0){
+        /* create session */
+        new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), &session_len);
+        if (new_session <0){
+            err("cluster- Accept error found\n");
+        }
 
-    valread = read(new_session, buffer, 1024);
-    printf("recved from client ::: %s\n", buffer);
-    send(new_session, file_context, strlen(file_context), 0);
-    printf("Hello message sent\n");
-
+        /*create and submit session to job queue */
+        submit(cluster, test_task_fn, (void* )(uintptr_t)new_session);
+        
+//        printf("new session created {%d}\n", new_session);
+   
+    }
 }
 
 static void* cluster_do(Cluster* cluster){
     int new_session;
     int session_len = sizeof(cluster->serv_addr);
 
-    printf("Cluster do connection status(%d)\n", cluster->connection);
-    while (cluster->connection ){
+    printf("======Cluster working on main thread :: connection  status(%d)===\n",(cluster->server_fd>0));
+    
+    while (SERVICE_KEEPALIVE && cluster->server_fd >0){
         /* create session */
         new_session = accept(cluster->server_fd, (struct sockaddr* )&(cluster->serv_addr), &session_len);
         if (new_session <0){
@@ -376,6 +454,39 @@ static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
 
 }
 
+
+void test_task_fn(void* args){
+
+    /*procceing session :: read find write send */
+    int timeout;
+    
+    Session* session_p = (Session* )args;
+    session_p->timeout->tv_sec = session_p->time_out_default; // default 90s
+    File* file_p;
+    printf("Thread #%d (%u)  Working on session[%ld] \n", session_p->worker_id , (int)pthread_self(), session_p->session_iid);
+    timeout = 0;
+
+    while (timeout==0){
+
+ 
+        session_p->varlead_status = read(session_p->session_iid, session_p->read_buffer, 1024);
+    
+        printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session_p->worker_id, session_p->session_iid,  session_p->read_buffer);
+    /*find file*/
+        
+        file_p = find_file(session_p->read_buffer);        
+        printf("--debug--d size %ld,  name %s\n", strlen(session_p->read_buffer),session_p->read_buffer);
+        
+        char find_file_loc[1024] = {0};
+    
+        snprintf(find_file_loc, 1024, "./tmp/loc/a.txt");
+        send(session_p->session_iid, find_file_loc, strlen(find_file_loc),0);
+        printf("\t: T[%d] send msg to Session[%ld] \n",session_p->worker_id ,session_p->session_iid);
+        timeout = 1;
+        free(file_p);
+    }
+}
+
 void task_fn(void* args){
     /*procceing session :: read find write send */
     int timeout;
@@ -383,24 +494,22 @@ void task_fn(void* args){
     Session* session_p = (Session* )args;
     session_p->timeout->tv_sec = session_p->time_out_default; // default 90s
     
-    printf("Thread #%u working on %ld, || timeout setting (%ld)\n", (int)pthread_self(), (uintptr_t) args, session_p->timeout->tv_sec);
-//    timeout = pthread_mutex_timedlock(&(session_p->timed_t), session_p->timeout);
+    printf("Thread #%d (%u)  Working on session[%ld] \n", session_p->worker_id , (int)pthread_self(), session_p->session_iid);
     timeout = 0;
     while (timeout==0){
 
  
         session_p->varlead_status = read(session_p->session_iid, session_p->read_buffer, 1024);
     
-        printf("recved from client :: %s \n", session_p->read_buffer);
+        printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session_p->worker_id, session_p->session_iid,  session_p->read_buffer);
     /*find file*/
         char find_file_loc[1024] = {0};
     
         snprintf(find_file_loc, 1024, "./tmp/loc/a.txt");
         send(session_p->session_iid, find_file_loc, strlen(find_file_loc),0);
-        printf("send msg to %ld \n", session_p->session_iid);
+        printf("\t: T[%d] send msg to Session[%ld] \n",session_p->worker_id ,session_p->session_iid);
         timeout = 1;
     }
-    printf("---session time out----\n");
     //close(session_p->session_iid);
 }
 
@@ -411,10 +520,10 @@ static int worker_init(Cluster* cluster, struct Worker** thread_p, int id){
         err("worker_init():: allocate worker on memory failed");
         return -1;
     }
-
+    
     (*thread_p) -> cluster = cluster;
     (*thread_p) -> id = id;
-    
+    (*thread_p) -> lock_idx =  (id % 3 ); 
     pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void* )) worker_do, (*thread_p));
     pthread_detach((*thread_p)->pthread);
 
@@ -428,9 +537,10 @@ static int _stream_init(Cluster** cluster){
     cluster_p->port = 32209;
     int opt = 6;
     int server_fd;
-
+//    server_fd = &(cluster_p->server_fd);
     
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    //cluster_p-> server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd <0){
         perror("stream_init() socket create failed \n");
         return -1;
@@ -447,16 +557,98 @@ static int _stream_init(Cluster** cluster){
         return -1;
     }
 
-
     if (listen(server_fd, 3)<0){
         perror("listen Failed\n");
         return -1;
     }
 
-    printf("stream done\n");
     cluster_p -> server_fd = server_fd;
-    cluster_p->connection = 1;
     return 0;
+}
+
+
+struct File* find_file(char* file_name){
+    File* file;
+    char file_path[120];
+    strcpy(file_path, "./server/book_file");
+    file = (struct File*)malloc(sizeof(struct File));
+    DIR* os_fd;
+    struct dirent* connector;
+    os_fd = opendir("./server/book_file/");
+    printf("---debug in find file , file path tmp, %s \n", file_path);
+    if (os_fd==NULL){
+        err("dir does not exists\n");
+        return NULL;
+    }
+
+    
+
+    while ((connector = readdir(os_fd))!= NULL){
+        char* d_name = connector->d_name;
+        if (strlen(d_name) ==strlen(file_name)){
+            int same=1;
+            for (int i =0; i< strlen(d_name); i++){
+                if (d_name[i]!= file_name[i]){
+                    same = 0;
+                    break;
+                }
+            }
+            if (same){
+                // write
+                strcpy(file_path, d_name);
+                FILE* fptr;
+                fptr = fopen(file_path, "rb");
+//                fread(file->contents, sizeof(file->contents), i) 
+
+
+            }
+        }
+    }
+
+
+
+    return NULL;
+}
+
+
+
+
+static int  file_hash_init(Cluster* cluster, FileHash** file_hash){
+    
+    FileHash* file_hash_p = (*file_hash);
+    file_hash_p = (struct FileHash* )malloc(sizeof(struct FileHash ));
+    if (file_hash_p==NULL){
+        err("|_ file_hash_init(): could not allocated file hash on memory");
+        return -1;
+    }
+    
+    /*hard coding dir*/
+    file_hash_p -> os_fd = opendir("./server/book_file");
+    
+    if (file_hash_p->os_fd==NULL){
+        err("dir does not exists\n");
+        return -1;
+    }
+
+    
+    int i = 0;
+
+    while ((file_hash_p->connector = readdir(file_hash_p->os_fd))!= NULL){
+        char* d_name = file_hash_p->connector->d_name;
+        if (strlen(d_name)>3){
+            file_hash_p->file_path[i] = (char *)malloc(sizeof(char));        
+            file_hash_p->file_path[i] = d_name;
+            i += 1;
+        }
+    } 
+    
+    
+    file_hash_p->file_len = min(0, i-1);
+    
+    cluster->file_hash = file_hash_p;
+    return 0;
+
+
 }
 
 
@@ -470,7 +662,7 @@ struct Cluster* cluster_init(int num_worker){
         return NULL;
     } 
     
-    /*create job queue */
+    /*create job queue, terminate condition */
     if (job_queue_init(&cluster->job_queue) < 0){
         err("could not allocate job queue ");
         /*free here */
@@ -478,6 +670,12 @@ struct Cluster* cluster_init(int num_worker){
         return NULL;
     }
 
+    /*not a terminate condition*/ 
+    if (file_hash_init(cluster, &cluster->file_hash) < 0){
+        err("could not allocate file hash");
+    }
+
+    printf("--debug filehash tot len%d\n", cluster->file_hash->file_len);
 
     cluster->workers = (struct Worker** )malloc(num_worker * sizeof(struct Worker* ));
     if (cluster->workers==NULL){
@@ -497,7 +695,7 @@ struct Cluster* cluster_init(int num_worker){
     /*create worker thread */
     for (int i=0; i<num_worker; i++){
         worker_init(cluster, &cluster->workers[i], i );
-        printf("Debug on cluster init : Work thread %d created\n", i);
+        printf("cluster init : Work thread %d created\n", i);
     }
 
      
@@ -521,9 +719,9 @@ int main(){
     SERVICE_KEEPALIVE =1;
     Cluster* cluster = cluster_init(10);
     /*stream processing start here */
-    pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
+    //pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
 
-    //pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) test_cluster_do, cluster);
+    pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) test_cluster_do, cluster);
 
     pthread_detach(cluster->main_thread);
 
