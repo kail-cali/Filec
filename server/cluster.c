@@ -127,6 +127,7 @@ typedef struct Cluster{
     int num_alive_worker;
     int num_working_worker;
     JobQueue job_queue;
+    int next_job_lock;
 
     int server_fd;
     struct sockaddr_in serv_addr;
@@ -164,41 +165,18 @@ static int submit_session(Cluster* cluster_p, void(*function_p)(void* ), void* s
 /*--------------------------*/
 
 
-static void bsem_list_init(BinSemaphore** bsem_list_p, int value){
-    
-    BinSemaphore* bsem_p = (*bsem_list_p);
-   // pthread_mutex_init(&(bsem_p->mutex), NULL);
-    /*
+static void bsem_list_init(BinSemaphore* bsem_list_p, int value){
+        
+    BinSemaphore* bsem_p = (bsem_list_p);
+    bsem_p  = (struct BinSemaphore* )malloc(sizeof(struct BinSemaphore ));
+    pthread_mutex_init(&(bsem_p->mutex), NULL);
+    printf("--debug--check bsem list \n");
 
     pthread_mutex_init(&(bsem_p->mutex), NULL);
     pthread_cond_init(&(bsem_p->cond),NULL);
     bsem_p->v = value;
-*/
 
 }
-
-
-static void bsem_list_post(BinSemaphore** bsem_list_p){
-
-    BinSemaphore* bsem_p = (*bsem_list_p);
-    
-    pthread_mutex_lock(&bsem_p->mutex);
-    bsem_p -> v = 1;
-    pthread_cond_signal(&bsem_p->cond);
-    pthread_mutex_unlock(&bsem_p->mutex);
-}
-
-
-static void bsem_list_wait(BinSemaphore** bsem_list_p){
-    BinSemaphore* bsem_p = (*bsem_list_p);
-    pthread_mutex_lock(&bsem_p->mutex);
-    while (bsem_p->v != 1){
-        pthread_cond_wait(&bsem_p->cond, &bsem_p->mutex);
-    }
-    bsem_p->v = 0;
-    pthread_mutex_unlock(&bsem_p->mutex);
-}
-
 
 
 static void bsem_init(BinSemaphore* bsem_p, int value){
@@ -231,6 +209,7 @@ static void wait(BinSemaphore* bsem_p){
 
 
 /*--------------------------*/
+
 static int control_init(Control* control_p){
          
 
@@ -243,7 +222,8 @@ static int job_queue_init(JobQueue* job_queue_p){
     job_queue_p->len =0;
     job_queue_p->front = NULL;
     job_queue_p->rear = NULL;
-    job_queue_p->lock_cnt = 3; 
+    /*#hard coding*/
+    job_queue_p->lock_cnt = 4; 
     job_queue_p->has_job = (struct BinSemaphore* )malloc(sizeof(struct BinSemaphore ));
     
     if (job_queue_p->has_job == NULL){
@@ -253,22 +233,43 @@ static int job_queue_init(JobQueue* job_queue_p){
     pthread_mutex_init(&(job_queue_p->rmutex), NULL);
     bsem_init(job_queue_p->has_job, 0);
     
-    // hard coding;
-    int num_lock;
-    num_lock = 3;
-    job_queue_p->job_list  = (struct BinSemaphore** )malloc(num_lock * sizeof(struct BinSemaphore *));
+    job_queue_p->job_list  = (struct BinSemaphore** )malloc(job_queue_p->lock_cnt * sizeof(struct BinSemaphore *));
     if (job_queue_p->job_list==NULL){
 
         err("cluster_init():: allocatate job_list  on memory failed\n");
         return -1;
      }
     
-    for (int i=0; i< 3; i++){
-        bsem_list_init(&job_queue_p->job_list[i], 0);
-        continue;
+    for (int i=0; i< job_queue_p->lock_cnt; i++){
+        bsem_list_init(job_queue_p->job_list[i], 0);
      }
      
     return 0;
+}
+
+static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* new_job){
+    
+    pthread_mutex_lock(&job_queue_p->rmutex);
+    new_job->prev = NULL;
+
+    if (job_queue_p->len==0){
+        job_queue_p->front = new_job;
+        job_queue_p->rear = new_job;
+    }
+    if (job_queue_p->len==1){
+        new_job->prev = job_queue_p->front;
+        job_queue_p->rear = job_queue_p ->front;
+        job_queue_p-> front = new_job;
+
+    }
+    if (job_queue_p->len>=2){
+        new_job->prev = job_queue_p->front;
+        job_queue_p->front = new_job;
+    }
+    job_queue_p -> len ++ ;
+    bsem_post(has_job);
+
+    pthread_mutex_unlock(&job_queue_p->rmutex);
 }
 
 static void push(JobQueue* job_queue_p, struct Job* new_job){
@@ -295,6 +296,29 @@ static void push(JobQueue* job_queue_p, struct Job* new_job){
     pthread_mutex_unlock(&job_queue_p->rmutex);
     
 }
+
+
+static struct Job* pop_front(JobQueue* job_queue_p, BinSemaphore* has_job ){
+    pthread_mutex_lock(&job_queue_p-> rmutex);
+    Job* front_job = job_queue_p -> front;
+    if (job_queue_p ->len ==0){
+
+    }
+    else if (job_queue_p->len==1){
+        job_queue_p->front = NULL;
+        job_queue_p->rear = NULL;
+        job_queue_p -> len = 0;
+    }
+    else if (job_queue_p->len >= 2){
+        job_queue_p -> front = front_job->prev;
+        job_queue_p -> len --;
+        bsem_post(has_job);
+    }
+    pthread_mutex_unlock(&job_queue_p->rmutex);
+    return front_job;
+
+}
+
 
 static struct Job*  pop(JobQueue* job_queue_p){
     pthread_mutex_lock(&job_queue_p->rmutex);
@@ -329,13 +353,13 @@ static void* worker_do(Worker* thread_p){
     char worker_name[16] = {0};
     snprintf(worker_name, 16, "worker#%d", thread_p->id);
     Cluster* cluster_p = thread_p->cluster;
-    
     pthread_mutex_lock(&cluster_p->lock);
     cluster_p->num_alive_worker +=1;
     pthread_mutex_unlock(&cluster_p->lock);
 
     while (SERVICE_KEEPALIVE) {
         wait(cluster_p->job_queue.has_job);
+        // wait(cluster_p->job_queue.job_list[thread_p->lock_idx]);
         if (SERVICE_KEEPALIVE){
 
             pthread_mutex_lock(&cluster_p->lock);
@@ -346,7 +370,9 @@ static void* worker_do(Worker* thread_p){
 
             void(* fn_buf)(void* );
             void* args_buf;
-            Job* job_p = pop(&cluster_p->job_queue);
+            // Job* job_p = pop(&cluster_p->job_queue);
+            Job* job_p = pop_front(&cluster_p->job_queue, cluster_p->job_queue.has_job);
+           // Job* job_p = pop_front(&cluster_p->job_queue, cluster_p->job_queue.job_list[thread_p->lock_idx]);
             if (job_p){
                 job_p->info->worker_id = thread_p->id; 
                 fn_buf = job_p->function;
@@ -440,6 +466,11 @@ static void* cluster_do(Cluster* cluster){
 }
 
 static int submit_session(Cluster* cluster_p, void(*function_p)(void* ), void* args_p, char* buf_p){
+    /*
+     *
+     *not used 
+     *
+     * */
     printf("--test--debug submit seesion\n"); 
     Job* new_job;
  
@@ -484,24 +515,17 @@ static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
     session_info->session_iid = (uintptr_t) args_p;
     session_info->varlead_status;
     
-    pthread_mutex_init(&(session_info->timed_t), NULL);
-
-    session_info->timeout = (struct timespec* )malloc(sizeof(struct timespec ));
-    if (session_info->timeout==NULL){
-        err("at submit():: could not allocate memory for timeout");
-        return -1;
-    }
-    /*--<#>---------default value hard coding------------------   */
-    session_info->time_out_default = 90;
-
 
     /*process task at function */
      
     new_job->function = function_p;
-    new_job->args = args_p ;
     new_job->info = session_info;
     
-    push(&cluster_p->job_queue, new_job);
+//    push(&cluster_p->job_queue, new_job);
+   // push_back(&cluster_p->job_queue, cluster_p->job_queue.job_list[cluster_p->next_job_lock] , new_job);
+    push_back(&cluster_p->job_queue, cluster_p->job_queue.has_job , new_job);
+    cluster_p->next_job_lock ++;
+    cluster_p->next_job_lock %= cluster_p->job_queue.lock_cnt;
     return 0;
 
 }
@@ -513,7 +537,6 @@ void test_task_fn(void* args){
     int timeout = 0;
     
     Session* session_p = (Session* )args;
-//    session_p->timeout->tv_sec = session_p->time_out_default; // default 90s
     File* file_p;
     printf("Thread #%d (%u)  Working on session[%ld] \n", session_p->worker_id , (int)pthread_self(), session_p->session_iid);
 
@@ -577,7 +600,7 @@ static int worker_init(Cluster* cluster, struct Worker** thread_p, int id){
     
     (*thread_p) -> cluster = cluster;
     (*thread_p) -> id = id;
-    (*thread_p) -> lock_idx =  (id % 3 ); 
+    (*thread_p) -> lock_idx =  (id % cluster->job_queue.lock_cnt ); 
     pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void* )) worker_do, (*thread_p));
     pthread_detach((*thread_p)->pthread);
 
@@ -591,10 +614,8 @@ static int _stream_init(Cluster** cluster){
     cluster_p->port = 32209;
     int opt = 6;
     int server_fd;
-//    server_fd = &(cluster_p->server_fd);
     
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    //cluster_p-> server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd <0){
         perror("stream_init() socket create failed \n");
         return -1;
@@ -660,10 +681,11 @@ struct File* find_file(char* file_name){
                     printf("\t at find file():: fptr error check file path %s \n", file_path);
                     break;
                 }
+                size_t tmp_buffer_size = sizeof(file->contents_b)+1;
+//                printf("\t--debug-- buffer size %ld \n", tmp_buffer_size);
+              
+                fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
 
-                for (int i=0; i<10; i++){
-                    fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
-                }
                 snprintf(file->name,50, "%s", d_name);
                 file->find = 1;
                 fclose(fptr);
@@ -682,7 +704,9 @@ struct File* find_file(char* file_name){
 
 
 static int  file_hash_init(Cluster* cluster, FileHash** file_hash){
-    
+   /*
+    not used 
+    * */ 
     FileHash* file_hash_p = (*file_hash);
     file_hash_p = (struct FileHash* )malloc(sizeof(struct FileHash ));
     if (file_hash_p==NULL){
@@ -730,7 +754,7 @@ struct Cluster* cluster_init(int num_worker){
         return NULL;
     } 
      
-    
+    cluster->next_job_lock = 0; 
     /*create job queue, terminate condition */
     if (job_queue_init(&cluster->job_queue) < 0){
         err("could not allocate job queue ");
@@ -787,7 +811,7 @@ void flush(Cluster* cluster_p){
 int main(){
     
     SERVICE_KEEPALIVE =1;
-    Cluster* cluster = cluster_init(10);
+    Cluster* cluster = cluster_init(3);
     /*stream processing start here */
     //pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
 
