@@ -283,11 +283,12 @@ void request(void* args){
     int valread;
     Json* query = (Json* )args;
     char txt_file[1024];
-    printf("Thread #%u working on  book name (%s)\n", (int)pthread_self(), query->book );
+    printf("Thread #%d (%u) working on  book name (%s)\n", query->id,(int)pthread_self(), query->book );
     send(query->session_id, query->book, query->len, 0);
-    printf("debug--send done from thread[%u] \n", (int)pthread_self());
+    printf("\t T[%d] send done \n", query->id);
     valread = read(query->session_id, txt_file, 1024);
-    printf("debug--recv(%s) done from thread[%u] \n", txt_file,(int)pthread_self());
+    
+    printf("\t T[%d] recv from server :: %s \n", query->id, txt_file);
 
 }
 
