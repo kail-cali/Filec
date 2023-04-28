@@ -18,6 +18,14 @@
 
 
 typedef struct Json{
+    /*
+    Used for request query
+    All the request and recv context is carried by json object
+    session_id :: client fd
+    id :: logical id for query
+    book :: read buffer
+     
+     */
     int session_id;
     int id;
     int len;
@@ -30,9 +38,10 @@ typedef struct Json{
 } Json;
 
 
-/*-----class*/
+/*-----class----------*/
 
-static volatile int SERVICE_KEEPALIVE;
+static volatile int SERVICE_KEEPALIVE; // Global status
+
 
 typedef struct BinSemaphore{
     pthread_mutex_t mutex;
@@ -58,7 +67,26 @@ typedef struct JobQueue{
     int len;
 } JobQueue;
 
+
+
+
 typedef struct Context {
+    /*
+    Used for processing query at the thread
+    
+    Each Context is independent but job-queue
+    
+
+    If job is allocated, 
+    - Create stream
+    - Request query to server
+    - Recv result
+
+
+
+     
+
+     */
     int id;
     int fd;
     pthread_t pthread;
@@ -71,6 +99,22 @@ typedef struct Context {
 } Context;
 
 typedef struct Driver {
+    /*
+    Virtualize Context from user
+    
+    Manage all the allocation, submit, and child thread
+    process query with batch Context 
+    
+    
+    - Create object
+    - Recv query from user
+    - Create json and submit to Context
+    
+    num_context:: Batch units that can be processed at one time
+    
+     
+     
+     */
     Context** contexts;
     int num_context;
     int run_forever ;
@@ -196,7 +240,6 @@ static struct Job* pop(JobQueue* job_queue_p){
 
 
 static int _stream_init(Context*** thread_p){
-  //  printf("stream debug : %d\n", (**thread_p)->id);
     Context* context_p = (**thread_p);
     context_p->port = 32209;
     char* tmp = "127.0.0.1";
@@ -220,28 +263,19 @@ static int _stream_init(Context*** thread_p){
         err("_stream_init(): connection failed\n");
         return -1;
     }
-//    context_p->fd = client_fd;
     return 0;
 }
-/*after context craeted, make stream in context, and give fd to context_thread*/
 
-static void* test_context_do(struct Context* thread_p){
-    char debug[17]= {0};
-    char read_buffer[1024]= {0};
-
-    
-    printf("TEST:: test_context_do\n");
-    snprintf(debug, 17, "context-%d", thread_p->id);
-    Driver* driver_p = thread_p->driver;
-    int valread;
-    printf("msg to send from client:: %s \n", debug);
-    send(thread_p->fd, debug, strlen(debug),0);
-    valread = read(thread_p->fd, read_buffer, 1024);
-    printf("test-recv :: %s \n", read_buffer);
-
-
-}
 static int _set_session(Context* context_p, Json* query){
+    /*
+    Set session info to qeury
+    query doesn't know which Context take job, until Context get a job
+    after that,  can put some infomation needed to processing stream
+    
+    *All the works done with functionly*
+
+
+    */
     query-> session_id = context_p->fd;
     query -> id = context_p->id;
     query -> processed_ts = 12;
@@ -249,6 +283,16 @@ static int _set_session(Context* context_p, Json* query){
 }
 
 static void* context_do(struct Context* thread_p){
+    /*
+     Context process stream at the thread
+
+     -Wait until new query added
+     -put session_fd and meta infomation to Json* Qeury
+     -call function Request(query)
+
+     
+
+     */
     /*fn for processing thread, same as excutor*/
     char debug_[17]= {0};
     snprintf(debug_, 17, "context-%d", thread_p->id);
@@ -269,17 +313,26 @@ static void* context_do(struct Context* thread_p){
 
                 free(job_p->query);
                 free(job_p);
-               // printf("debug-- context thread -- job done\n");
+   //             close(thread_p->fd);
             }
 
         }
 
     }
-    close(thread_p->fd);
+   // close(thread_p->fd);
 }
 
 
 void request(void* args){
+    /*
+    Function for requst query to server
+    -Read Json file
+    -Send book name to server
+    -Recv book contents from server
+     
+     
+
+     */
     int valread;
     Json* query = (Json* )args;
     char txt_file[1024];
@@ -294,6 +347,14 @@ void request(void* args){
 
 
 static int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
+    /*
+    Submit query to job-queue so that Context do work
+    - create job contaiener
+    - create Json shaped query
+    - push_bach to job-queue
+     
+
+     */
     Job* new_job;
     Json* query;
 
@@ -328,6 +389,13 @@ static int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
 
 
 static int sample(Driver* driver){
+    /*
+    Read request book name from file
+    submit to job-queue
+     
+    works functionaly
+
+     */
     printf("TEST:: Sample query\n ");
     int i ; 
     FILE *fptr;
@@ -340,11 +408,6 @@ static int sample(Driver* driver){
     while ( fscanf(fptr, "%s", buf)==1 )
         if (i < 10){
             done =  add_query(driver, request, (void* )(char* )buf);
-            /*
-            if (done >=0){
-                 printf("done: txt(%ld):: %s\n",sizeof(buf), buf);
-            }
-            */
         i+=1;
         }
         
@@ -381,7 +444,6 @@ static int context_init(Driver* driver, struct Context** thread_p, int id){
     
     printf("create context on thread\n");
     pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
-   // pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) test_context_do, (*thread_p));
     pthread_detach((*thread_p)->pthread);
     return 0;
 
@@ -422,25 +484,6 @@ struct Driver* driver_init(int num_context){
     return driver;
 }
 
-// currently single Context thread is forced
-/*
-static int flush(Driver* driver_p){
-    if (driver_p){
-
-        if (driver_p->job_queue){
-            free(driver_p->job_queue);
-        }
-        
-
-        for (int i=0; i<driver_p->num_context;i++){
-            continue;
-        }
-        free(driver_p);
-        
-    }
-
-}
-*/
 int main(){
     Driver* driver  = driver_init(10);
     printf("--------------runing---------------- \n");
