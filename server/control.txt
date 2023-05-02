@@ -1,0 +1,7 @@
+port    44098
+inet    "127.0.0.1"
+num_worker  4
+session_timeout 30
+epoll_timeout   5
+max_epoll_event 1024
+
