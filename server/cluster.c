@@ -79,7 +79,6 @@ typedef struct Session{
     int worker_id;
 
 
-    char* reader;
 
     char read_buffer[1024];
     int varlead_status;
@@ -226,7 +225,9 @@ void test_task_fn(void* args);
 
 struct File* find_file(char* file_name);
 
-static int submit_with_read(Cluster* cluster, char* reader, void(*function)(void* ), void* args);
+
+struct Session* create_session(int  new_session_id );
+static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p);
 /*--------------------------*/
 
 
@@ -455,9 +456,11 @@ static void* cluster_do(Cluster* cluster){
              else {
                  int str_len;
                  int new_session = epoll_events[i].data.fd;
-                 char read_buffer[1024];
-                 str_len = read(new_session, &read_buffer, sizeof(read_buffer));
+                 Session* session;
+                 session = create_session(new_session);
 
+                 str_len = read(session->session_iid, session->read_buffer, sizeof(session->read_buffer));
+                
                  if (str_len==0){
                      printf("close session timeout [%d]\n", new_session);
                      close(new_session);
@@ -465,7 +468,7 @@ static void* cluster_do(Cluster* cluster){
 
                  }
                  else{
-                    submit_with_read(cluster, read_buffer, task_fn, (void* )(uintptr_t)new_session); 
+                    submit_with_session(cluster, task_fn, (void* )(uintptr_t)session);
                  }
 
 
@@ -506,7 +509,9 @@ static void* test_cluster_do(Cluster* cluster){
     }
 }
 
-static int submit_with_read(Cluster* cluster, char* reader, void(*function)(void* ), void* args){
+
+static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p){
+    
     Job* new_job;
     new_job =(struct Job*)malloc(sizeof(struct Job));
     
@@ -514,28 +519,33 @@ static int submit_with_read(Cluster* cluster, char* reader, void(*function)(void
         err("at submit():: could not allocate memory for new job\n");
         return -1;
     }
-         
-    /*map session */
-    Session* session_info;
-    session_info = (struct Session* )malloc(sizeof(struct Session));
-    if (session_info ==NULL){
     
-        err("at submit():: could not allocate memory for new session\n");
-        return -1;
-    }
-    session_info->session_iid = (uintptr_t) args;
-    session_info->varlead_status;
-    session_info->reader = reader; 
-
-    /*process task at function */
-     
+    Session* session;
+    session = session_p;
     new_job->function = function;
-    new_job->info = session_info;
-    
+    new_job->info = session;
+
     push_back(&cluster->job_queue, cluster->job_queue.has_job , new_job);
     return 0;
 
 }
+
+
+
+struct Session* create_session(int new_session_id ){
+    
+    Session* session;
+    session = (struct Session* )malloc(sizeof(struct Session));
+    if (session ==NULL){
+    
+        err("at submit():: could not allocate memory for new session\n");
+        return NULL;
+    }
+
+    session->session_iid = (uintptr_t)new_session_id;
+    return session;
+}
+
 
 static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
     /*
@@ -592,9 +602,9 @@ void task_fn(void* args){
     File* file;
     printf("Thread #%d (%u)  Working on session[%ld] \n", session->worker_id , (int)pthread_self(), session->session_iid);
     
-    printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->reader);
+    printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
     
-    file = find_file(session->reader);
+    file = find_file(session->read_buffer);
         
     if (file==NULL){
         char no_file_msg[1024] = {0};
