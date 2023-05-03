@@ -41,6 +41,8 @@ typedef struct Control{
     /**/
     int num_lock;
 
+    char root[20];
+
 
 
 } Control;
@@ -111,7 +113,17 @@ typedef struct Job{
     Session* info;
 } Job;
 
+typedef struct JobScheduler{
+    pthread_mutex_t rxmutex;
 
+    Job* front;
+    Job* rear;
+
+    int len;
+    BinSemaphore** has_job;
+
+
+} JobScheduler;
 typedef struct JobQueue{
     /*
      Queue object for manage job-linked-list, works with two pointer
@@ -151,6 +163,8 @@ typedef struct Worker{
      */
     pthread_t pthread;
     int id;
+
+    int semaphore_id; // logical index for mutex lock
 
     struct Cluster* cluster;
 
@@ -197,6 +211,8 @@ typedef struct Cluster{
     int num_alive_worker;
     int num_working_worker;
     JobQueue job_queue;
+
+    JobScheduler scheduler;// ###(nf) job-scheduling
 
     int server_fd;
     struct sockaddr_in serv_addr;
@@ -287,21 +303,13 @@ static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* 
     
     pthread_mutex_lock(&job_queue_p->rmutex);
     new_job->prev = NULL;
-// ### 1 일 때 동작이 이상하다 아무 의미없는 동작일 수 있다
-// 큐 써클 자료구조인지 싱글인지 체크한 뒤 어떻게 push back pop 할지 정해야한다
     if (job_queue_p->len==0){
         job_queue_p->front = new_job;
         job_queue_p->rear = new_job;
     }
-    if (job_queue_p->len==1){
-        new_job->prev = job_queue_p->front;
-        job_queue_p->rear = job_queue_p ->front;
-        job_queue_p-> front = new_job;
-
-    }
-    if (job_queue_p->len>=2){
-        new_job->prev = job_queue_p->front;
-        job_queue_p->front = new_job;
+    if (job_queue_p->len>=1){
+        job_queue_p->rear->prev = new_job;
+        job_queue_p->rear = new_job;
     }
     job_queue_p -> len ++ ;
     bsem_post(has_job);
@@ -310,6 +318,12 @@ static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* 
 }
 
 
+
+static struct Job* pop_front_cluster(JobQueue* job_queue){
+
+
+
+}
 
 static struct Job* pop_front(JobQueue* job_queue_p, BinSemaphore* has_job ){
     pthread_mutex_lock(&job_queue_p-> rmutex);
@@ -406,6 +420,8 @@ static void* cluster_do(Cluster* cluster){
     }
 
     struct epoll_event event;
+    //event = (struct epoll_event* )malloc(sizeof(struct epoll_event));
+
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = cluster->server_fd;
 
@@ -414,6 +430,7 @@ static void* cluster_do(Cluster* cluster){
     }
 
     struct epoll_event epoll_events[control->max_epoll_event];
+//    epoll_events = (struct epoll_event* )malloc((control->max_epoll_event) * sizeof(struct epoll_event ));
     int batch4event;
     
     while (SERVICE_KEEPALIVE && cluster->server_fd >0){
@@ -749,10 +766,10 @@ struct File* find_file(char* file_name){
 
     File* file;
 
-    char file_path[130] = {0};
+    char file_path[1024] = {0};
     /*#hard coding */
     char* hard_path = "./server/book_file/";
-    snprintf(file_path, 24,"%s", hard_path);
+    snprintf(file_path, strlen(hard_path)+1,"%s", hard_path);
     file = (struct File*)malloc(sizeof(struct File));
     DIR* os_fd;
     struct dirent* connector;
@@ -896,6 +913,9 @@ static int control_init(Control* control){
         else if (strcmp(key, "max_epoll_event")==0){
             control -> max_epoll_event = atoi(value);
         }
+        else if (strcmp(key, "root")==0){
+            strcpy(control->root, value);
+        }
         
     }
     
@@ -918,7 +938,6 @@ int main(){
     
     // ###->&&& 왜 쓰레드를 나중에 만들었는지 
     // ### cluster 가 worker 들을 매니징할 수 있는 지 아니면 demon thread 같은 개념인지
-   // pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) test_cluster_do, cluster);
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
 
     pthread_detach(cluster->main_thread);
