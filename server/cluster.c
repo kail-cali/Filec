@@ -118,12 +118,13 @@ typedef struct JobScheduler{
 
     Job* front;
     Job* rear;
-
+    int num_lock;
     int len;
     BinSemaphore** has_job;
-
+//job scheduler 
 
 } JobScheduler;
+
 typedef struct JobQueue{
     /*
      Queue object for manage job-linked-list, works with two pointer
@@ -244,6 +245,7 @@ struct File* find_file(char* file_name);
 
 struct Session* create_session(int  new_session_id );
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p);
+static int semaphore_init(JobScheduler* scheduler, struct BinSemaphore** node);
 /*--------------------------*/
 
 
@@ -317,7 +319,13 @@ static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* 
     pthread_mutex_unlock(&job_queue_p->rmutex);
 }
 
+static void push_back_cluster(JobScheduler* scheduler, BinSemaphore* has_job, struct Job* new_job){
 
+    new_job->prev = NULL;
+    
+
+
+}
 
 static struct Job* pop_front_cluster(JobQueue* job_queue){
 
@@ -690,6 +698,33 @@ void test_task_fn(void* args){
 }
 
 
+static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
+    /*
+    
+     */
+    scheduler->len = 0;
+    scheduler->front = NULL;
+    scheduler -> rear = NULL;
+    scheduler->num_lock = num_lock;
+
+    scheduler -> has_job = (struct BinSemaphore** )malloc(num_lock*sizeof(struct BinSemaphore* ));;
+
+    for (int i=0; i< num_lock; i++){
+        semaphore_init(scheduler, &scheduler->has_job[i]); 
+        
+    }
+
+    return 0;
+}
+
+
+static int semaphore_init(JobScheduler* scheduler, struct BinSemaphore** node){
+    *node = (struct BinSemaphore* )malloc(sizeof(struct BinSemaphore ));
+    bsem_init((*node), 0);
+
+
+    return 0;
+}
 
 static int worker_init(Cluster* cluster, struct Worker** thread_p, int id){
     *thread_p = (struct Worker*)malloc(sizeof(struct Worker));
@@ -708,7 +743,6 @@ static int worker_init(Cluster* cluster, struct Worker** thread_p, int id){
 
 
 static int epoll_init(Cluster* cluster, int server_fd){
-    printf("-debug:: epoll_init()\n");
     
     return 0;
 
@@ -846,6 +880,7 @@ struct Cluster* cluster_init(Control* control){
     } 
     
     cluster->control = control;
+    cluster->num_worker = control->num_worker;
     int num_worker = control->num_worker;
     /*create job queue, terminate condition */
     if (job_queue_init(&cluster->job_queue) < 0){
@@ -855,8 +890,17 @@ struct Cluster* cluster_init(Control* control){
         return NULL;
     }
     
+    
+    /*###<nf> job scheduler */
+    if (job_scheduler_init(&cluster->scheduler, cluster->num_worker) <0){
+        free(cluster);
+        return NULL;
+    } 
 
-
+    printf("--debug-- <job-scheudler> num lock %d \n", cluster->scheduler.num_lock);
+    printf("--debug-- <job-scheudler> lock 1-idx %ld \n", (uintptr_t)(cluster->scheduler.has_job[0]));
+    printf("--debug-- <job-scheduler> allocate\n");
+     
     cluster->workers = (struct Worker** )malloc(num_worker * sizeof(struct Worker* ));
     if (cluster->workers==NULL){
 
