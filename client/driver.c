@@ -15,7 +15,13 @@
 /*client code*/
 /*----data structure------*/
 
+typedef struct Connect{
+    char root[100];
+    char inet[20];
+    int port;
 
+
+} Connect;
 
 typedef struct Json{
     /*
@@ -30,7 +36,6 @@ typedef struct Json{
     int id;
     int len;
     int req_ts;
-    int processed_ts;
     char book[255];
     int cat;
 
@@ -197,14 +202,9 @@ static void push(JobQueue* job_queue_p, struct Job* new_job){
         job_queue_p->front = new_job;
         job_queue_p->rear = new_job;
     }    
-    if (job_queue_p->len==1){
-        new_job->prev = job_queue_p->front;
-        job_queue_p->rear = job_queue_p->front;
-        job_queue_p->front = new_job;
-    }
-    if (job_queue_p->len>=2){
-        new_job->prev = job_queue_p->front;
-        job_queue_p->front = new_job;
+    if (job_queue_p->len>=1){
+        job_queue_p->rear->prev = new_job;
+        job_queue_p->rear= new_job;
     }
 
     
@@ -278,7 +278,6 @@ static int _set_session(Context* context_p, Json* query){
     */
     query-> session_id = context_p->fd;
     query -> id = context_p->id;
-    query -> processed_ts = 12;
     return 0;
 }
 
