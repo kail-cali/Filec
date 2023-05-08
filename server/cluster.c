@@ -527,7 +527,6 @@ static void* scheduler_do(Cluster* cluster){
 
 static void* pipeline(Cluster* cluster){
     printf("== cluster start pipe  on thread== \n");
-    /*<DEV> new_epoll for thread-pipe*/
 
     Control* control = cluster->control;
     
