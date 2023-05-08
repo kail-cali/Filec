@@ -38,7 +38,6 @@ typedef struct Json{
     int req_ts;
     char book[255];
     int cat;
-
     
 } Json;
 

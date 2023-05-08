@@ -242,14 +242,12 @@ struct Worker;
 
 static int worker_init(Cluster* cluster, struct Worker** thread_p, int id);
 
-static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p );
 
 void task_fn(void* args);
 
 
 static void bsem_post(BinSemaphore* bsem_p);
 
-void test_task_fn(void* args);
 
 struct File* find_file(char* file_name);
 
@@ -394,7 +392,6 @@ static void* worker_do_passive(Worker* worker){
 
      */
     
-    printf("\t--debug-- worker_do passive working \n");
     char worker_name[16] = {0};
     snprintf(worker_name, 16, "worker#%d", worker->id);
     Cluster* cluster =  worker->cluster;
@@ -430,75 +427,6 @@ static void* worker_do_passive(Worker* worker){
 }
 
 
-static void* worker_do(Worker* thread_p){
-    /*
-    Process session while service alive,
-    Wait until new job is allocated
-    
-    <INVALID> global lock for cluster 
-     
-     */
-    printf("\t THORW ERROR \n");
-    return NULL;
-    char worker_name[16] = {0};
-    snprintf(worker_name, 16, "worker#%d", thread_p->id);
-
-    Cluster* cluster_p = thread_p->cluster;
-   /*
-    pthread_mutex_lock(&cluster_p->lock);
-    cluster_p->num_alive_worker +=1;
-    pthread_mutex_unlock(&cluster_p->lock);
-*/
-    
-   /*----------------------------------------------------*/
-    while (SERVICE_KEEPALIVE) {
-        wait(cluster_p->job_queue.has_job);
-        if (SERVICE_KEEPALIVE){
-            /*
-            pthread_mutex_lock(&cluster_p->lock);
-            cluster_p->num_working_worker +=1;
-            pthread_mutex_unlock(&cluster_p->lock);
-*/
-
-            void(* fn_buf)(void* );
-            void* args_buf;
-
-            Job* job_p = pop_front(&cluster_p->job_queue, cluster_p->job_queue.has_job);
-            if (job_p){
-                job_p->info->worker_id = thread_p->id; 
-                fn_buf = job_p->function;
-                args_buf = job_p->info;
-                
-                fn_buf(args_buf);
-                
-                
-                free(job_p->info);
-                free(job_p);
-            }
-            /*temporerly give latnecy*/
-            printf("sleep - latnecy::thraed[%s]  \n", worker_name);
-            sleep(10);
-            printf("wake up- latnecy::thraed[%s] \n", worker_name);
-            char idle_worker_id[2];
-            idle_worker_id[0] = thread_p->id +'0';
-            write(cluster_p->pipe_fd[1], idle_worker_id, 2) ; 
-
-            /*delete later */
-        }
-  /*      
-        pthread_mutex_lock(&cluster_p->lock);
-        cluster_p->num_working_worker -= 1;
-        pthread_mutex_unlock(&cluster_p->lock);
-    */
-    }
-/*
-    pthread_mutex_lock(&cluster_p->lock);
-    cluster_p->num_alive_worker -= 1;
-    pthread_mutex_unlock(&cluster_p->lock);
-    */
-    return NULL;
-    
-}
 
 static void* scheduler_do(Cluster* cluster){
     printf("== cluster start scheduling on thread== \n");
@@ -519,9 +447,6 @@ static void* scheduler_do(Cluster* cluster){
             
         }
     }
-
-
-
 }
 
 
@@ -562,7 +487,6 @@ static void* pipeline(Cluster* cluster){
                 Job* new_job;
                 new_job =(struct Job*)malloc(sizeof(struct Job));
                 new_job->worker_id = atoi(who);
-                printf("---debug pipe read and push back %d \n", new_job->worker_id);
                 push_back(&cluster->worker_queue, cluster->worker_queue.has_job , new_job);
                 }
 
@@ -702,48 +626,6 @@ struct Session* create_session(int new_session_id ){
 }
 
 
-static int submit(Cluster* cluster_p, void(*function_p)(void* ), void* args_p ){
-    /*
-     Create session and push job to job-queue
-    
-     - Create job which container for processing query
-     - Create session wihch manage life-cycle of seesion, client fd, read-buffer
-     - Pusch back job (contianer) into queue
-
-     
-     
-     
-     */
-    /*mapping session and schedule at job queue */
-    Job* new_job;
-    
-    new_job = (struct Job* )malloc(sizeof(struct Job));
-    if (new_job==NULL){
-        err("at submit():: could not allocate memory for new job\n");
-        return -1;
-    }
-         
-    /*map session */
-    Session* session_info;
-    session_info = (struct Session* )malloc(sizeof(struct Session));
-    if (session_info ==NULL){
-    
-        err("at submit():: could not allocate memory for new session\n");
-        return -1;
-    }
-    session_info->session_iid = (uintptr_t) args_p;
-    session_info->varlead_status;
-    
-
-    /*process task at function */
-     
-    new_job->function = function_p;
-    new_job->info = session_info;
-    
-    push_back(&cluster_p->job_queue, cluster_p->job_queue.has_job , new_job);
-    return 0;
-
-}
 void task_fn(void* args){
     /*
      task fn
@@ -814,7 +696,6 @@ static int worker_init(Cluster* cluster, struct Worker** thread, int id){
     (*thread) -> cluster = cluster;
     (*thread) -> id = id;
     (*thread) -> semaphore_id = id;
-   // pthread_create(&(*thread)->pthread, NULL, (void * (*)(void* )) worker_do, (*thread));
     pthread_create(&(*thread)->pthread, NULL, (void * (*)(void* )) worker_do_passive, (*thread));
     pthread_detach((*thread)->pthread);
 
@@ -965,25 +846,19 @@ struct Cluster* cluster_init(Control* control){
     /*create job queue, terminate condition */
     if (job_queue_init(&cluster->job_queue) < 0){
         err("could not allocate job queue ");
-        /*free here */
         free(cluster);
         return NULL;
     }
-    /*<DEV>*/
     if (worker_queue_init(cluster,&cluster->worker_queue, num_worker)<0){
         free(cluster);
         return NULL;
     }
      
-    /*###<nf> job scheduler */
     if (job_scheduler_init(&cluster->scheduler, cluster->num_worker) <0){
         free(cluster);
         return NULL;
     } 
 
-    printf("--debug-- <job-scheudler> num lock %d \n", cluster->scheduler.num_lock);
-    printf("--debug-- <job-scheudler> lock 1-idx %ld \n", (uintptr_t)(cluster->scheduler.has_job[0]));
-    printf("--debug-- <job-scheduler> allocate\n");
      
     cluster->workers = (struct Worker** )malloc(num_worker * sizeof(struct Worker* ));
     if (cluster->workers==NULL){
@@ -1047,9 +922,6 @@ static int control_init(Control* control){
         
     }
     
-    
-    
-
     return 0;
 
 }
@@ -1064,9 +936,6 @@ int main(){
 
     Cluster* cluster = cluster_init(control);
     
-    // ###->&&& 왜 쓰레드를 나중에 만들었는지 
-    // ### cluster 가 worker 들을 매니징할 수 있는 지 아니면 demon thread 같은 개념인지
-    
     pthread_create(&(cluster->pipe_thread), NULL, (void * (*)(void* )) pipeline, cluster);
     pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduler_do, cluster);
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
@@ -1074,7 +943,6 @@ int main(){
     pthread_detach(cluster->main_thread);
 
     while ( SERVICE_KEEPALIVE){
-        // wait
         continue;
 
         }
