@@ -12,9 +12,12 @@
 ## api
 - Find File with non-blocking I/O
 - Transfer File
-
  
 
 ## Acrciteture
+`There is 3 Sub-Thread for each middle-ware server`
+- Listen Server
+- Pipe for multi-Worker thread 
+- Job Scheduler 
 
 
