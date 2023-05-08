@@ -389,7 +389,6 @@ static struct Job* pop_front(JobQueue* job_queue_p, BinSemaphore* has_job ){
 static void* worker_do_passive(Worker* worker){
     /*
      <v0.2> scheduling featrue init
-
      */
     
     char worker_name[16] = {0};

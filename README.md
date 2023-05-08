@@ -20,4 +20,18 @@
 - Pipe for multi-Worker thread 
 - Job Scheduler 
 
+## How To Run
+- how to compile
+- at root dir `./FileC`
+`source MakeFile && source MakeClient`
+- how to run
+server
+`./start_server`
+
+and client
+`./start_client`
+
+if you have your own specific inet and port,
+modified `./server/control.txt'
+`
 
