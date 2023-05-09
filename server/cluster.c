@@ -25,7 +25,6 @@
 /*Global*/
 
 static volatile int SERVICE_KEEPALIVE;  // Service status used for run forever or terminate program
-const int MAX_EVNET = 1024;
 
 /*----------class-----------*/
 
@@ -69,8 +68,6 @@ typedef struct File{
 } File;
 
 typedef struct Session{
-
-
     /*
     To manage client-session 
     
@@ -79,7 +76,6 @@ typedef struct Session{
     */
     uintptr_t session_iid;
     int worker_id;
-
 
 
     char read_buffer[1024];
@@ -120,8 +116,6 @@ typedef struct Job{
 typedef struct JobScheduler{
     pthread_mutex_t rxmutex;
 
-    Job* front;
-    Job* rear;
     int num_lock;
     int len;
     BinSemaphore** has_job;
@@ -183,8 +177,8 @@ typedef struct Cluster{
     /*
      Main thread-pool
      - Create stream
-     - Create worker and manage them with "num_alive_worker" and "num_working_worker""
-     - Handleing accpet process
+     - Create worker and manage them with worker-queue
+     - Handing client fd with epoll
      - Have global lock used for idle all thread or terminate thread
 
      --------------------------------------------------------------    
@@ -210,20 +204,19 @@ typedef struct Cluster{
     struct Control* control;
 
     pthread_t main_thread;
-
     pthread_t schedule_thread;
     pthread_t pipe_thread;
+
     pthread_mutex_t lock;
     pthread_cond_t idle;
 
     Worker** workers;
     int num_worker;
-    int num_alive_worker;
-    int num_working_worker;
+
     JobQueue job_queue;
     JobQueue worker_queue; // alive worker FIFO
 
-    JobScheduler scheduler;// ###(nf) job-scheduling
+    JobScheduler scheduler;
 
     int server_fd;
     struct sockaddr_in serv_addr;
@@ -251,6 +244,8 @@ static void bsem_post(BinSemaphore* bsem_p);
 
 struct File* find_file(char* file_name);
 
+struct File* find_file_only(char* file_name);
+
 static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* new_job);
 
 struct Session* create_session(int  new_session_id );
@@ -273,7 +268,6 @@ static void bsem_reset(BinSemaphore* bsem_p){
 static void bsem_post(BinSemaphore* bsem_p){
     pthread_mutex_lock(&bsem_p->mutex);
     bsem_p->v = 1;
-    // ### post 가 두번 되는 건 아닌지 확인해야 한다
     pthread_cond_signal(&bsem_p->cond);
     pthread_mutex_unlock(&bsem_p->mutex);
 }
@@ -284,7 +278,6 @@ static void wait(BinSemaphore* bsem_p){
         pthread_cond_wait(&bsem_p->cond, &bsem_p->mutex);
     }
     bsem_p->v = 0;
-    // ### value 를 누가 바꾸어주는지 중요하다 지금처럼 worker  가 전부 바꾸고 POST 하는 동작은 위험할 수 있다
     pthread_mutex_unlock(&bsem_p->mutex);
 
 }
@@ -357,7 +350,6 @@ static void push_back_worker(JobScheduler* scheduler,Worker* worker ,BinSemaphor
     pthread_mutex_unlock(&scheduler->rxmutex);
     
 
-
 }
 
 static struct Job* pop_front_worker(Worker* self){
@@ -412,9 +404,9 @@ static void* worker_do_passive(Worker* worker){
                 free(new_job);
             }
 
-            printf("sleep - latnecy::thraed[%s]  \n", worker_name);
-            sleep(10);
-            printf("wake up- latnecy::thraed[%s] \n", worker_name);
+   //         printf("sleep - latnecy::thraed[%s]  \n", worker_name);
+//            sleep(10);
+ //           printf("wake up- latnecy::thraed[%s] \n", worker_name);
             char idle_worker_id[2];
             idle_worker_id[0] = who +'0';
             write(cluster->pipe_fd[1], idle_worker_id, 2) ; 
@@ -507,7 +499,6 @@ static void* cluster_do(Cluster* cluster){
     }
 
     struct epoll_event event;
-    //event = (struct epoll_event* )malloc(sizeof(struct epoll_event));
 
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = cluster->server_fd;
@@ -517,7 +508,6 @@ static void* cluster_do(Cluster* cluster){
     }
 
     struct epoll_event epoll_events[control->max_epoll_event];
-//    epoll_events = (struct epoll_event* )malloc((control->max_epoll_event) * sizeof(struct epoll_event ));
     int batch4event;
     
     while (SERVICE_KEEPALIVE && cluster->server_fd >0){
@@ -640,7 +630,8 @@ void task_fn(void* args){
     
     printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
     
-    file = find_file(session->read_buffer);
+    //file = find_file(session->read_buffer);
+    file = find_file_only(session->read_buffer);
         
     if (file==NULL){
         char no_file_msg[1024] = {0};
@@ -662,8 +653,6 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     
      */
     scheduler->len = 0;
-    scheduler->front = NULL;
-    scheduler -> rear = NULL;
     scheduler->num_lock = num_lock;
 
     scheduler -> has_job = (struct BinSemaphore** )malloc(num_lock*sizeof(struct BinSemaphore* ));;
@@ -745,6 +734,30 @@ static int _stream_init(Cluster** cluster_p){
     return 0;
 }
 
+
+struct File* find_file_only(char* file_name){
+    File* file;
+    char file_path[1024] = {0};
+
+    char* path = "./server/book_file/";
+    snprintf(file_path, strlen(path)+1, "%s", path);
+    strcat(file_path, file_name);
+    
+    FILE* fptr;
+    fptr = fopen(file_path, "r");
+    if (fptr==NULL){
+        return NULL;
+    } 
+    file = (struct File* )malloc(sizeof(struct File));
+
+    fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
+
+    
+    snprintf(file->name,50, "%s", file_name);
+    file->find = 1;
+    fclose(fptr);
+    return file;
+}
 
 struct File* find_file(char* file_name){
     
@@ -940,7 +953,8 @@ int main(){
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
 
     pthread_detach(cluster->main_thread);
-
+    pthread_detach(cluster->pipe_thread);
+    pthread_detach(cluster->schedule_thread);
     while ( SERVICE_KEEPALIVE){
         continue;
 

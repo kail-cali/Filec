@@ -64,7 +64,7 @@ typedef struct Job{
 } Job;
 
 typedef struct JobQueue{
-    pthread_mutex_t rmutex;
+    pthread_mutex_t rxmutex;
     Job* front;
     Job* rear;
     BinSemaphore* has_job;
@@ -154,7 +154,7 @@ static int job_queue_init(JobQueue* job_queue_p){
         err("job_queue_init():: binary setaphore allocation failed ");
         return -1;
     }
-    pthread_mutex_init(&(job_queue_p->rmutex), NULL);
+    pthread_mutex_init(&(job_queue_p->rxmutex), NULL);
     bsem_init(job_queue_p->has_job, 0);
     return 0;
 }
@@ -187,52 +187,50 @@ static void wait(BinSemaphore* bsem_p){
     bsem_p-> v = 0;
     pthread_mutex_unlock(&bsem_p->mutex);
 
-
 }
+
+static void push_back(JobQueue* job_queue, BinSemaphore* has_job, Job* new_job){
+
+    pthread_mutex_lock(&job_queue->rxmutex);
+    new_job -> prev = NULL;
+    if (job_queue->len==0){
+        job_queue->front = new_job;
+        job_queue->rear = new_job;
+    }
+    if (job_queue->len>=1){
+        job_queue->rear->prev = new_job;
+        job_queue->rear  = new_job;
+    }
+    job_queue->len +=1;
+    bsem_post(has_job);
+    pthread_mutex_unlock(&job_queue->rxmutex);
+}
+
 
 static void push(JobQueue* job_queue_p, struct Job* new_job){
-    /*Broadcast to work thread*/
-    pthread_mutex_lock(&job_queue_p->rmutex);
-    new_job->prev = NULL;
-
-    if (job_queue_p->len==0){
-        job_queue_p->front = new_job;
-        job_queue_p->rear = new_job;
-    }    
-    if (job_queue_p->len>=1){
-        job_queue_p->rear->prev = new_job;
-        job_queue_p->rear= new_job;
-    }
-
-    
-    job_queue_p->len ++;
-    bsem_post(job_queue_p->has_job);    
-    pthread_mutex_unlock(&job_queue_p->rmutex);
 }
 
+static struct Job* pop_front(JobQueue* job_queue, BinSemaphore* has_job){
+    pthread_mutex_lock(&job_queue->rxmutex);
+    Job* front_job = job_queue->front;
+    
+    if (job_queue -> len==1){
+        job_queue -> front = NULL;
+        job_queue -> rear = NULL;
+        job_queue -> len = 0;
+    }
+    else if (job_queue -> len >=2){
+        job_queue -> front = front_job->prev;
+        job_queue -> len -=1;
+        bsem_post(has_job);
+    }
 
+    pthread_mutex_unlock(&job_queue->rxmutex);
+    return front_job;
+
+}
 
 static struct Job* pop(JobQueue* job_queue_p){
-    pthread_mutex_lock(&job_queue_p->rmutex);
-
-    Job* job_p = job_queue_p->front;
-    
-    if (job_queue_p->len==0){
-    }
-    else if (job_queue_p->len==1){
-        job_queue_p->front = NULL;
-        job_queue_p->rear = NULL;
-        job_queue_p->len=0;
-
-    }
-    else if (job_queue_p->len>=2){
-        job_queue_p->front = job_p->prev;
-        job_queue_p->len --;
-        bsem_post(job_queue_p->has_job);
-    }
-    
-    pthread_mutex_unlock(&job_queue_p->rmutex);
-    return job_p;
 }
 
 
@@ -278,7 +276,33 @@ static int _set_session(Context* context_p, Json* query){
     return 0;
 }
 
-static void* context_do(struct Context* thread_p){
+static void* context_do(Context* context){
+    char debug_[17] = {0};
+    snprintf(debug_, 17, "context-%d", context->id);
+    Driver* driver = context->driver;
+    
+    while (SERVICE_KEEPALIVE){
+        wait(driver->job_queue.has_job);
+        if (SERVICE_KEEPALIVE && context->fd>=0){
+            void(* fn)(void* );
+            void* args;
+            Job* new_job = pop_front(&driver->job_queue, driver->job_queue.has_job);
+            if (new_job){
+                fn = new_job->function;
+                _set_session(context, new_job->query);
+                args = new_job->query;
+                fn(args);
+                free(new_job->query);
+                free(new_job);
+
+            }
+        }
+    }
+
+
+}
+
+static void* test_context_do(struct Context* thread_p){
     /*
      Context process stream at the thread
 
@@ -290,32 +314,6 @@ static void* context_do(struct Context* thread_p){
 
      */
     /*fn for processing thread, same as excutor*/
-    char debug_[17]= {0};
-    snprintf(debug_, 17, "context-%d", thread_p->id);
-    Driver* driver_p = thread_p->driver;
-
-    while (SERVICE_KEEPALIVE){
-        wait(driver_p->job_queue.has_job);
-        if (SERVICE_KEEPALIVE && thread_p->fd >=0){
-            //send(thread_p->client_fd, )
-            void(* fn)(void* );
-            void* args;
-            Job* job_p = pop(&driver_p->job_queue);
-            if(job_p){
-                fn = job_p->function;
-                _set_session(thread_p, job_p->query);    
-                args = job_p->query;
-                fn(args);
-
-                free(job_p->query);
-                free(job_p);
-   //             close(thread_p->fd);
-            }
-
-        }
-
-    }
-   // close(thread_p->fd);
 }
 
 
@@ -376,8 +374,7 @@ static int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
     new_job->function =function_p;
     new_job->query = query;
     Driver* driver_p = driver;
-
-    push(&driver_p->job_queue, new_job);
+    push_back(&driver->job_queue, driver->job_queue.has_job, new_job);
 
     return 0;
 }
@@ -481,7 +478,7 @@ struct Driver* driver_init(int num_context){
 }
 
 int main(){
-    Driver* driver  = driver_init(10);
+    Driver* driver  = driver_init(1);
     printf("--------------runing---------------- \n");
     /*test code on sample */
     sample(driver);
