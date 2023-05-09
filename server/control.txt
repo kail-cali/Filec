@@ -1,8 +1,10 @@
 port    32209
 inet    "127.0.0.1"
-num_worker  3
-session_timeout 5
+num_worker  4
+session_timeout 120000
 epoll_timeout   5
 max_epoll_event 1024
-root    "./server/book_file/"
+executor.cores.scheduling   0
+
+
 

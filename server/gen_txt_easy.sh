@@ -11,3 +11,4 @@ echo "Lestrade then arrives and reveals that Stangerson has been murdered. His b
 echo "Years later in 1860, a now-grown Lucy befriends and falls in love with a man named Jefferson Hope. ">> book_file/The_Adventure_of_the_Abbey_Grange.txt
 
 echo "He swears vengeance on Drebber and Stangerson, but he begins to suffer from an aortic aneurysm, causing him to leave the mountains to earn money and recuperate." >> book_file/The_Country_of_the_Saints.txt
+
