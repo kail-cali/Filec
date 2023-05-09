@@ -117,6 +117,7 @@ typedef struct Job{
 
 } Job;
 
+
 typedef struct JobScheduler{
     pthread_mutex_t rxmutex;
 
@@ -125,7 +126,6 @@ typedef struct JobScheduler{
     int num_lock;
     int len;
     BinSemaphore** has_job;
-//job scheduler 
 
 } JobScheduler;
 
@@ -223,7 +223,6 @@ typedef struct Cluster{
     JobQueue job_queue;
     JobQueue worker_queue; // alive worker FIFO
 
-    JobScheduler scheduler;// ###(nf) job-scheduling
 
     int server_fd;
     struct sockaddr_in serv_addr;
@@ -273,7 +272,6 @@ static void bsem_reset(BinSemaphore* bsem_p){
 static void bsem_post(BinSemaphore* bsem_p){
     pthread_mutex_lock(&bsem_p->mutex);
     bsem_p->v = 1;
-    // ### post 가 두번 되는 건 아닌지 확인해야 한다
     pthread_cond_signal(&bsem_p->cond);
     pthread_mutex_unlock(&bsem_p->mutex);
 }
@@ -284,7 +282,6 @@ static void wait(BinSemaphore* bsem_p){
         pthread_cond_wait(&bsem_p->cond, &bsem_p->mutex);
     }
     bsem_p->v = 0;
-    // ### value 를 누가 바꾸어주는지 중요하다 지금처럼 worker  가 전부 바꾸고 POST 하는 동작은 위험할 수 있다
     pthread_mutex_unlock(&bsem_p->mutex);
 
 }
@@ -354,16 +351,15 @@ static void push_back_worker(JobScheduler* scheduler,Worker* worker ,BinSemaphor
     worker->job = new_job;
     bsem_post(has_job);
 
+
     pthread_mutex_unlock(&scheduler->rxmutex);
-    
-
-
 }
 
 static struct Job* pop_front_worker(Worker* self){
     Job* new_job = self->job;
     return new_job;
 }
+
 
 static struct Job* pop_front(JobQueue* job_queue_p, BinSemaphore* has_job ){
     pthread_mutex_lock(&job_queue_p-> rxmutex);
@@ -583,13 +579,20 @@ static void* cluster_do(Cluster* cluster){
 }
 
 
+
 static void* test_cluster_do(Cluster* cluster){
 
 }
 
-
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p){
     
+    /*
+     Create session and push job to job-queue
+    
+     - Create job which container for processing query
+     - Create session wihch manage life-cycle of seesion, client fd, read-buffer
+     - Pusch back job (contianer) into queue
+     */
     Job* new_job;
     new_job =(struct Job*)malloc(sizeof(struct Job));
     
@@ -657,6 +660,7 @@ void task_fn(void* args){
 }
 
 
+
 static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     /*
     
@@ -675,6 +679,7 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
 
     return 0;
 }
+
 
 
 static int semaphore_init(JobScheduler* scheduler, struct BinSemaphore** node){
@@ -935,6 +940,7 @@ int main(){
 
     Cluster* cluster = cluster_init(control);
     
+
     pthread_create(&(cluster->pipe_thread), NULL, (void * (*)(void* )) pipeline, cluster);
     pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduler_do, cluster);
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
