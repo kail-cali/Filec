@@ -37,23 +37,20 @@ typedef struct Control{
     int session_timeout;
     int epoll_timeout;
     int max_epoll_event;
-    /**/
     int num_lock;
-
+    int scheduling_mode;
     char root[20];
 
 
-
 } Control;
-
+/*
 typedef struct Event{
     int event_id;
     struct epoll_event event;
     struct sockaddr_in client_addr;
 
 } Event;
-
-
+*/
 
 typedef struct File{
     /*
@@ -76,7 +73,6 @@ typedef struct Session{
     */
     uintptr_t session_iid;
     int worker_id;
-
 
     char read_buffer[1024];
     int varlead_status;
@@ -119,7 +115,6 @@ typedef struct JobScheduler{
     int num_lock;
     int len;
     BinSemaphore** has_job;
-//job scheduler 
 
 } JobScheduler;
 
@@ -422,7 +417,6 @@ static void* scheduler_do(Cluster* cluster){
     printf("== cluster start scheduling on thread== \n");
     //JobScheduler* scheduler = cluster>scheduler;
     while (SERVICE_KEEPALIVE){
-        // wait new job has come
         wait(cluster->job_queue.has_job);
         if (SERVICE_KEEPALIVE){
  
@@ -777,7 +771,7 @@ static int _stream_init(Cluster** cluster_p){
 
 struct File* find_file_only(char* file_name){
     File* file;
-    char file_path[1024] = {0};
+    char file_path[2048] = {0};
 
     char* path = "./server/book_file/";
     snprintf(file_path, strlen(path)+1, "%s", path);
@@ -942,7 +936,8 @@ static int control_init(Control* control){
      */
     FILE* fptr;
     // hard coding --> add  argparse later version
-    char* root = "./server/control.txt";
+    // char* root = "./server/control.txt";
+    char* root = "./server/control.private.txt";
     
     fptr = fopen(root, "a+");
     char key[20];
@@ -967,6 +962,9 @@ static int control_init(Control* control){
         }
         else if (strcmp(key, "root")==0){
             strcpy(control->root, value);
+        }
+        else if (strcmp(key, "ececutor.cores.scheduling")){
+            control -> scheduling_mode = atoi(value);
         }
         
     }
