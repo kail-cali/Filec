@@ -25,7 +25,6 @@
 /*Global*/
 
 static volatile int SERVICE_KEEPALIVE;  // Service status used for run forever or terminate program
-const int MAX_EVNET = 1024;
 
 /*----------class-----------*/
 
@@ -38,23 +37,20 @@ typedef struct Control{
     int session_timeout;
     int epoll_timeout;
     int max_epoll_event;
-    /**/
     int num_lock;
-
+    int scheduling_mode;
     char root[20];
 
 
-
 } Control;
-
+/*
 typedef struct Event{
     int event_id;
     struct epoll_event event;
     struct sockaddr_in client_addr;
 
 } Event;
-
-
+*/
 
 typedef struct File{
     /*
@@ -69,8 +65,6 @@ typedef struct File{
 } File;
 
 typedef struct Session{
-
-
     /*
     To manage client-session 
     
@@ -79,8 +73,6 @@ typedef struct Session{
     */
     uintptr_t session_iid;
     int worker_id;
-
-
 
     char read_buffer[1024];
     int varlead_status;
@@ -121,8 +113,6 @@ typedef struct Job{
 typedef struct JobScheduler{
     pthread_mutex_t rxmutex;
 
-    Job* front;
-    Job* rear;
     int num_lock;
     int len;
     BinSemaphore** has_job;
@@ -183,8 +173,8 @@ typedef struct Cluster{
     /*
      Main thread-pool
      - Create stream
-     - Create worker and manage them with "num_alive_worker" and "num_working_worker""
-     - Handleing accpet process
+     - Create worker and manage them with worker-queue
+     - Handing client fd with epoll
      - Have global lock used for idle all thread or terminate thread
 
      --------------------------------------------------------------    
@@ -210,18 +200,20 @@ typedef struct Cluster{
     struct Control* control;
 
     pthread_t main_thread;
-
     pthread_t schedule_thread;
     pthread_t pipe_thread;
+
     pthread_mutex_t lock;
     pthread_cond_t idle;
 
     Worker** workers;
     int num_worker;
-    int num_alive_worker;
-    int num_working_worker;
+
     JobQueue job_queue;
     JobQueue worker_queue; // alive worker FIFO
+
+
+    JobScheduler scheduler;
 
 
     int server_fd;
@@ -248,7 +240,8 @@ void task_fn(void* args);
 static void bsem_post(BinSemaphore* bsem_p);
 
 
-struct File* find_file(char* file_name);
+
+struct File* find_file_only(char* file_name);
 
 static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* new_job);
 
@@ -353,6 +346,7 @@ static void push_back_worker(JobScheduler* scheduler,Worker* worker ,BinSemaphor
 
 
     pthread_mutex_unlock(&scheduler->rxmutex);
+
 }
 
 static struct Job* pop_front_worker(Worker* self){
@@ -408,9 +402,9 @@ static void* worker_do_passive(Worker* worker){
                 free(new_job);
             }
 
-            printf("sleep - latnecy::thraed[%s]  \n", worker_name);
-            sleep(10);
-            printf("wake up- latnecy::thraed[%s] \n", worker_name);
+   //         printf("sleep - latnecy::thraed[%s]  \n", worker_name);
+//            sleep(10);
+ //           printf("wake up- latnecy::thraed[%s] \n", worker_name);
             char idle_worker_id[2];
             idle_worker_id[0] = who +'0';
             write(cluster->pipe_fd[1], idle_worker_id, 2) ; 
@@ -427,7 +421,6 @@ static void* scheduler_do(Cluster* cluster){
     printf("== cluster start scheduling on thread== \n");
     //JobScheduler* scheduler = cluster>scheduler;
     while (SERVICE_KEEPALIVE){
-        // wait new job has come
         wait(cluster->job_queue.has_job);
         if (SERVICE_KEEPALIVE){
  
@@ -503,7 +496,6 @@ static void* cluster_do(Cluster* cluster){
     }
 
     struct epoll_event event;
-    //event = (struct epoll_event* )malloc(sizeof(struct epoll_event));
 
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = cluster->server_fd;
@@ -513,7 +505,6 @@ static void* cluster_do(Cluster* cluster){
     }
 
     struct epoll_event epoll_events[control->max_epoll_event];
-//    epoll_events = (struct epoll_event* )malloc((control->max_epoll_event) * sizeof(struct epoll_event ));
     int batch4event;
     
     while (SERVICE_KEEPALIVE && cluster->server_fd >0){
@@ -569,7 +560,6 @@ static void* cluster_do(Cluster* cluster){
                  else{
                     submit_with_session(cluster, task_fn, (void* )(uintptr_t)session);
                  }
-
 
              }
          }
@@ -643,7 +633,7 @@ void task_fn(void* args){
     
     printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
     
-    file = find_file(session->read_buffer);
+    file = find_file_only(session->read_buffer);
         
     if (file==NULL){
         char no_file_msg[1024] = {0};
@@ -666,8 +656,6 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     
      */
     scheduler->len = 0;
-    scheduler->front = NULL;
-    scheduler -> rear = NULL;
     scheduler->num_lock = num_lock;
 
     scheduler -> has_job = (struct BinSemaphore** )malloc(num_lock*sizeof(struct BinSemaphore* ));;
@@ -713,7 +701,50 @@ static int epoll_init(Cluster* cluster, int server_fd){
 
 }
 
+static int async_stream_init(Cluster** cluster_p){
+    printf("Async stream init \n");
+    Cluster* cluster = (*cluster_p);
+    cluster->port = cluster->control->port;
+    int opt = 1;
+    int server_fd;
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd <0){
+        perror("stream_init() scoket create failed\n");
+        return -1;
+    } 
 
+    int flags = fcntl(server_fd, F_GETFL);
+    flags |= O_NONBLOCK;
+    if (fcntl(server_fd, F_SETFL, flags)<0){
+        return -1;
+    }
+    
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
+        perror("set socket opt\n");
+        return -1;
+    }
+    cluster->serv_addr.sin_family=AF_INET;
+    cluster->serv_addr.sin_addr.s_addr = INADDR_ANY;
+    cluster->serv_addr.sin_port = htons(cluster->port);
+    if (bind(server_fd, (struct sockaddr*)&(cluster->serv_addr), sizeof((cluster->serv_addr)))<0){
+        err("stream_init : Bind Failed\n");
+        return -1;
+    }
+
+    if (listen(server_fd, 3)<0){
+        perror("listen Failed\n");
+        return -1;
+    }
+
+    cluster -> server_fd = server_fd;
+    if (epoll_init(cluster, server_fd)<0){
+        perror("set epoll Failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+/*
 static int _stream_init(Cluster** cluster_p){
     Cluster* cluster = (*cluster_p);
     cluster->port = 32209;
@@ -749,24 +780,39 @@ static int _stream_init(Cluster** cluster_p){
     }
     return 0;
 }
+*/
 
+struct File* find_file_only(char* file_name){
+    File* file;
+    char file_path[2048] = {0};
 
+    char* path = "./server/book_file/";
+    snprintf(file_path, strlen(path)+1, "%s", path);
+    strcat(file_path, file_name);
+    
+    FILE* fptr;
+    fptr = fopen(file_path, "r");
+    if (fptr==NULL){
+        return NULL;
+    } 
+    file = (struct File* )malloc(sizeof(struct File));
+
+    fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
+
+    
+    snprintf(file->name,50, "%s", file_name);
+    file->find = 1;
+    fclose(fptr);
+    return file;
+}
+
+/*
 struct File* find_file(char* file_name){
     
-    /*
-    Find file with I/O 
-    - Find dir from root
-    - Find same length of file name
-    - Configure while target and exist name is same
-    - If does, read to memory buffer
-    - Return with file struct
-    - If not, return NULL
-     */
 
     File* file;
 
     char file_path[1024] = {0};
-    /*#hard coding */
     char* hard_path = "./server/book_file/";
     snprintf(file_path, strlen(hard_path)+1,"%s", hard_path);
     file = (struct File*)malloc(sizeof(struct File));
@@ -819,7 +865,7 @@ struct File* find_file(char* file_name){
 }
 
 
-
+*/
 
 
 
@@ -872,10 +918,16 @@ struct Cluster* cluster_init(Control* control){
     }
     
     /*create stream on cluster*/
+    if (async_stream_init(&cluster) < 0 ){
+        err("|_ create stream Failed \n");
+        return NULL;
+    }
+    /*
     if (_stream_init(&cluster)<0){
         err("|_create stream Failed\n");
         return NULL;
     }
+    */
     /*create lock*/ 
     pthread_mutex_init(&(cluster->lock), NULL);
     pthread_cond_init(&cluster->idle, NULL);
@@ -897,7 +949,8 @@ static int control_init(Control* control){
      */
     FILE* fptr;
     // hard coding --> add  argparse later version
-    char* root = "./server/control.txt";
+    // char* root = "./server/control.txt";
+    char* root = "./server/control.private.txt";
     
     fptr = fopen(root, "a+");
     char key[20];
@@ -923,6 +976,9 @@ static int control_init(Control* control){
         else if (strcmp(key, "root")==0){
             strcpy(control->root, value);
         }
+        else if (strcmp(key, "ececutor.cores.scheduling")){
+            control -> scheduling_mode = atoi(value);
+        }
         
     }
     
@@ -946,7 +1002,8 @@ int main(){
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
 
     pthread_detach(cluster->main_thread);
-
+    pthread_detach(cluster->pipe_thread);
+    pthread_detach(cluster->schedule_thread);
     while ( SERVICE_KEEPALIVE){
         continue;
 
