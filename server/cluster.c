@@ -242,7 +242,6 @@ void task_fn(void* args);
 static void bsem_post(BinSemaphore* bsem_p);
 
 
-struct File* find_file(char* file_name);
 
 struct File* find_file_only(char* file_name);
 
@@ -564,7 +563,6 @@ static void* cluster_do(Cluster* cluster){
                     submit_with_session(cluster, task_fn, (void* )(uintptr_t)session);
                  }
 
-
              }
          }
 
@@ -630,7 +628,6 @@ void task_fn(void* args){
     
     printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
     
-    //file = find_file(session->read_buffer);
     file = find_file_only(session->read_buffer);
         
     if (file==NULL){
@@ -697,7 +694,50 @@ static int epoll_init(Cluster* cluster, int server_fd){
 
 }
 
+static int async_stream_init(Cluster** cluster_p){
+    printf("Async stream init \n");
+    Cluster* cluster = (*cluster_p);
+    cluster->port = cluster->control->port;
+    int opt = 1;
+    int server_fd;
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd <0){
+        perror("stream_init() scoket create failed\n");
+        return -1;
+    } 
 
+    int flags = fcntl(server_fd, F_GETFL);
+    flags |= O_NONBLOCK;
+    if (fcntl(server_fd, F_SETFL, flags)<0){
+        return -1;
+    }
+    
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
+        perror("set socket opt\n");
+        return -1;
+    }
+    cluster->serv_addr.sin_family=AF_INET;
+    cluster->serv_addr.sin_addr.s_addr = INADDR_ANY;
+    cluster->serv_addr.sin_port = htons(cluster->port);
+    if (bind(server_fd, (struct sockaddr*)&(cluster->serv_addr), sizeof((cluster->serv_addr)))<0){
+        err("stream_init : Bind Failed\n");
+        return -1;
+    }
+
+    if (listen(server_fd, 3)<0){
+        perror("listen Failed\n");
+        return -1;
+    }
+
+    cluster -> server_fd = server_fd;
+    if (epoll_init(cluster, server_fd)<0){
+        perror("set epoll Failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+/*
 static int _stream_init(Cluster** cluster_p){
     Cluster* cluster = (*cluster_p);
     cluster->port = 32209;
@@ -733,7 +773,7 @@ static int _stream_init(Cluster** cluster_p){
     }
     return 0;
 }
-
+*/
 
 struct File* find_file_only(char* file_name){
     File* file;
@@ -759,22 +799,13 @@ struct File* find_file_only(char* file_name){
     return file;
 }
 
+/*
 struct File* find_file(char* file_name){
     
-    /*
-    Find file with I/O 
-    - Find dir from root
-    - Find same length of file name
-    - Configure while target and exist name is same
-    - If does, read to memory buffer
-    - Return with file struct
-    - If not, return NULL
-     */
 
     File* file;
 
     char file_path[1024] = {0};
-    /*#hard coding */
     char* hard_path = "./server/book_file/";
     snprintf(file_path, strlen(hard_path)+1,"%s", hard_path);
     file = (struct File*)malloc(sizeof(struct File));
@@ -827,7 +858,7 @@ struct File* find_file(char* file_name){
 }
 
 
-
+*/
 
 
 
@@ -880,10 +911,16 @@ struct Cluster* cluster_init(Control* control){
     }
     
     /*create stream on cluster*/
+    if (async_stream_init(&cluster) < 0 ){
+        err("|_ create stream Failed \n");
+        return NULL;
+    }
+    /*
     if (_stream_init(&cluster)<0){
         err("|_create stream Failed\n");
         return NULL;
     }
+    */
     /*create lock*/ 
     pthread_mutex_init(&(cluster->lock), NULL);
     pthread_cond_init(&cluster->idle, NULL);
