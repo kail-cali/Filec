@@ -16,8 +16,8 @@
 
 ## Acrciteture
 `There is 3 Sub-Thread for each middle-ware server`
+- Pipe connection with thread-pool
 - Listen Server
-- Pipe for multi-Worker thread 
 - Job Scheduler 
 
 ## How To Run
