@@ -44,14 +44,13 @@ typedef struct Control{
 
 
 } Control;
-/*
-typedef struct Event{
-    int event_id;
-    struct epoll_event event;
-    struct sockaddr_in client_addr;
 
-} Event;
-*/
+typedef struct Tokenizer{
+
+
+} Tokenizer;
+
+
 
 typedef struct File{
     /*
