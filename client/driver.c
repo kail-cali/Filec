@@ -461,6 +461,7 @@ static int sample(Driver* driver){
 
     while ( fscanf(fptr, "%s", buf)==1 )
         if (i < 10){
+            printf("---debug check buf %s\n", buf);
             done =  add_query(driver, request, (void* )(char* )buf);
         i+=1;
         }

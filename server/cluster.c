@@ -115,7 +115,8 @@ typedef struct JobScheduler{
 
     int num_lock;
     int len;
-    BinSemaphore** has_job;
+    
+    sem_t mutex;
 
 } JobScheduler;
 
@@ -166,8 +167,6 @@ typedef struct Worker{
     Job* job; // <v.0.2>private container for new job 
 
 
-    int* pipe[2];
-
 
     struct Cluster* cluster;
 
@@ -216,15 +215,13 @@ typedef struct Cluster{
     int num_worker;
 
     JobQueue job_queue;
-    JobQueue worker_queue; // alive worker FIFO
+
 
     JobScheduler scheduler;
 
     int server_fd;
     struct sockaddr_in serv_addr;
     int port;
-
-    int pipe_fd[2];
 
 
     /*pipe */
@@ -262,9 +259,47 @@ static void push_back(JobQueue* job_queue_p, BinSemaphore* has_job, struct Job* 
 
 struct Session* create_session(int  new_session_id );
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p);
-static int semaphore_init(JobScheduler* scheduler, struct BinSemaphore** node);
 /*--------------------------*/
 
+
+/*read& write socket */
+/*
+static int read_clean(int fd, void* buf, size_t len){
+
+    int nread;
+    while((nread = read(fd, buf, len)) > 0) {
+         buf[nread]='\0';    // explicit null termination: updated based on comments
+         printf("%s\n",buf); // print the current receive buffer with a newline
+         fflush(stdout);         // make sure everything makes it to the output
+    }
+    return 0;
+}
+static int read_nowait(int fd, void *buf, size_t len){
+    ssize_t ret;
+     
+    while (len != 0 && (ret = read (fd, buf, len)) != 0) {
+        if (ret == -1) {
+            if (errno == EINTR) continue;
+                perror ("read(): error");
+                    break;                   
+        }
+        len -= ret;
+        buf += ret;            
+    }
+    buf[ret] = '\0';
+
+
+
+    return 0;
+}
+
+
+*/
+
+
+static void sem_reset(sem_t* mutex, int value){
+    sem_init(mutex, 0, value);
+}
 
 static void bsem_init(BinSemaphore* bsem_p, int value){
 
@@ -328,6 +363,63 @@ static int job_queue_init_old(JobQueue* job_queue_p){
 }
 
 
+static void push_back_sem(JobQueue* job_queue, struct Job* new_job){
+     
+    pthread_mutex_lock(&job_queue->rxmutex);
+    // sem_wait(&job_queue->mutex);
+    new_job->prev = NULL;
+    
+    if (job_queue->len==0){
+        job_queue->front = new_job;
+        job_queue->rear = new_job;
+    }
+    if (job_queue->len>=1){
+        job_queue->rear->prev = new_job;
+        job_queue->rear = new_job;
+    }
+    job_queue -> len ++ ;
+    sem_post(&job_queue->mutex);
+    pthread_mutex_unlock(&job_queue->rxmutex);
+}
+
+
+
+static void push_back_worker(Worker* worker , struct Job* new_job){
+    
+    worker->job = new_job;
+
+}
+
+static struct Job* pop_front_worker(Worker* self){
+    Job* new_job = self->job;
+    return new_job;
+}
+
+
+static struct Job* pop_front_sem(JobQueue* job_queue){
+    sem_wait(&job_queue->mutex);
+    
+    pthread_mutex_lock(&job_queue-> rxmutex);
+    Job* front = job_queue ->front;
+    if (job_queue->len==1){
+        job_queue->front = NULL;
+        job_queue->rear = NULL;
+        job_queue -> len = 0;
+    } 
+    else if (job_queue->len >=2){
+        job_queue -> front = front->prev;
+        job_queue -> len -- ;
+        
+    }
+    pthread_mutex_unlock(&job_queue->rxmutex);
+    return front;
+}
+
+
+
+
+
+
 
 static int pipe_init(Cluster* cluster, int num_worker){
    
@@ -362,7 +454,7 @@ static int pipe_init(Cluster* cluster, int num_worker){
     
     
 }
-
+/*
 static void* pipe_connection(Cluster* cluster){
     printf("==debug cluster start pipe on thread== \n");
     
@@ -382,7 +474,7 @@ static void* pipe_connection(Cluster* cluster){
             Job* new_job;
             new_job = (struct Job*)malloc(sizeof(struct Job));
             new_job->worker_id = atoi(who);           
-            
+            who[0] = '\0'; 
             push_back(&cluster->worker_queue, cluster->worker_queue.has_job, new_job);
         }
 
@@ -390,136 +482,71 @@ static void* pipe_connection(Cluster* cluster){
     }
 
 }
+*/
 
-
-
-// @ job_queue_init.create
-static int worker_queue_init(Cluster* cluster, JobQueue* worker_queue, int num_worker){
+static void* scheduling(Cluster* cluster){
     /*
+     1)Multi-plexing thread with full-duplex pipe
+     2) Job Scheduling with FIFO
      */
-    if (  job_queue_init_old(worker_queue) <0){
-        return -1;
+    printf("==(debug) Scheduler Start on Thread == \n");
+    int alives;
+    int status;
+    char who[2];
+    char notify[2];
+
+
+    while (SERVICE_KEEPALIVE){
+        alives = epoll_wait(cluster->pipe_epoll_fd, cluster->pipe_events, cluster->num_worker, cluster-> control->session_timeout);
+        if (alives <0){
+            err("--Scheduling -- epoll wait error \n");
+            continue;
+        }
+        for (int i=0; i < alives; i++){
+
+            read(cluster-> pipe_events[i].data.fd, who, sizeof(who));
+            int worker_id = atoi(who);
+            who[0] = '\0';
+
+            // wait until new job has published
+            Job*  new_job = pop_front_sem(&cluster-> job_queue);
+
+            if (SERVICE_KEEPALIVE){
+                push_back_worker( cluster->workers[worker_id], new_job);
+                sprintf(notify, "%d", worker_id);
+                write(cluster->worker_pipe[worker_id][1], notify, sizeof(notify));
+                notify[0] = '\0';
+            }
+
+                   
+            
+
+        }
     }
-
-    for (int i=0; i< num_worker; i++){
-
-     Job* new_job;
-     new_job =(struct Job*)malloc(sizeof(struct Job));
-     new_job->worker_id = i;
-     push_back(&cluster->worker_queue, cluster->worker_queue.has_job , new_job);
-    } 
-
-    return 0;
-}
-
-
-static void push_back_sem(JobQueue* job_queue, struct Job* new_job){
-     
-    pthread_mutex_lock(&job_queue->rxmutex);
-    // sem_wait(&job_queue->mutex);
-    new_job->prev = NULL;
-    
-    if (job_queue->len==0){
-        job_queue->front = new_job;
-        job_queue->rear = new_job;
-    }
-    if (job_queue->len>=1){
-        job_queue->rear->prev = new_job;
-        job_queue->rear = new_job;
-    }
-    job_queue -> len ++ ;
-    sem_post(&job_queue->mutex);
-    pthread_mutex_unlock(&job_queue->rxmutex);
-}
-
-
-static void push_back(JobQueue* job_queue, BinSemaphore* has_job, struct Job* new_job){
-    
-    pthread_mutex_lock(&job_queue->rxmutex);
-    new_job->prev = NULL;
-    if (job_queue->len==0){
-        job_queue->front = new_job;
-        job_queue->rear = new_job;
-    }
-    if (job_queue->len>=1){
-        job_queue->rear->prev = new_job;
-        job_queue->rear = new_job;
-    }
-    job_queue -> len ++ ;
-    bsem_post(has_job);
-
-    pthread_mutex_unlock(&job_queue->rxmutex);
 }
 
 
 
-static void push_back_worker(JobScheduler* scheduler,Worker* worker , struct Job* new_job){
-    
-//    pthread_mutex_lock(&scheduler->rxmutex);
-    worker->job = new_job;
-
-  //  pthread_mutex_unlock(&scheduler->rxmutex);
-    
-
-}
-
-static struct Job* pop_front_worker(Worker* self){
-    Job* new_job = self->job;
-    return new_job;
-}
 
 
-static struct Job* pop_front_sem(JobQueue* job_queue){
-    sem_wait(&job_queue->mutex);
-    
-    pthread_mutex_lock(&job_queue-> rxmutex);
-    Job* front = job_queue ->front;
-    if (job_queue->len==1){
-        job_queue->front = NULL;
-        job_queue->rear = NULL;
-        job_queue -> len = 0;
-    } 
-    else if (job_queue->len >=2){
-        job_queue -> front = front->prev;
-        job_queue -> len -- ;
-        
-    }
-    pthread_mutex_unlock(&job_queue->rxmutex);
-    return front;
-}
 
-static struct Job* pop_front(JobQueue* job_queue_p, BinSemaphore* has_job ){
-    pthread_mutex_lock(&job_queue_p-> rxmutex);
-    Job* front_job = job_queue_p -> front;
-    if (job_queue_p ->len ==0){
-
-    }
-    else if (job_queue_p->len==1){
-        job_queue_p->front = NULL;
-        job_queue_p->rear = NULL;
-        job_queue_p -> len = 0;
-    }
-    else if (job_queue_p->len >= 2){
-        job_queue_p -> front = front_job->prev;
-        job_queue_p -> len --;
-        bsem_post(has_job);
-        // ### 
-    }
-    pthread_mutex_unlock(&job_queue_p->rxmutex);
-    return front_job;
-
-}
 
 static void* worker_do_pipe(Worker* worker){
 
     char worker_name[16] = {0};
     snprintf(worker_name, 16, "worker#%d", worker->id);
     Cluster* cluster = worker -> cluster;
-    int who = worker ->semaphore_id;
+    int self = worker -> id;
     char stage[2];
+    char notify[2];
+    sem_wait(&cluster->scheduler.mutex); 
     
+    notify[0] = '\0';
+    sprintf(notify,"%d", self);
+    write(cluster->cluster_pipe[self][1], notify, sizeof(notify));
+
     while (SERVICE_KEEPALIVE){
-        int status = read(cluster->worker_pipe[who][0], stage, sizeof(stage) );
+        int status = read(cluster->worker_pipe[self][0], stage, sizeof(stage) );
         if (status <0){
             printf("read status errer \n");
             continue;
@@ -528,17 +555,16 @@ static void* worker_do_pipe(Worker* worker){
         void* args;
         Job* new_job = pop_front_worker(worker);
         if (new_job){
-            new_job->info->worker_id = who;
+            new_job->info->worker_id = self;
             fn = new_job->function;
             args = new_job->info;
             fn(args);
             free(new_job->info);
             free(new_job);
         }
-        char tmp[2];
-        sprintf(tmp,"%d", who);
-        printf("--debug---- idle worker %s \n ", tmp);         
-        write(cluster->cluster_pipe[who][1], tmp, sizeof(tmp));
+        //sprintf(notify,"%d", self);
+        write(cluster->cluster_pipe[self][1], notify, sizeof(notify));
+        //notify[0] = '\0';
 
     }
 }
@@ -576,7 +602,7 @@ static void* worker_do_passive(Worker* worker){
 
 }
 */
-
+/*
 static void* test_scheduler_do(Cluster* cluster){
     printf("==DEBUG cluster start scheduling on thread==\n");
     while (SERVICE_KEEPALIVE){
@@ -589,7 +615,7 @@ static void* test_scheduler_do(Cluster* cluster){
             if (SERVICE_KEEPALIVE){
                 Job* worker = pop_front(&cluster->worker_queue, cluster->worker_queue.has_job);
                 int who = worker->worker_id;
-                push_back_worker(&cluster->scheduler, cluster->workers[who], new_job);
+//                push_back_worker(&cluster- cluster->workers[who], new_job);
 
                 char tmp[2];
                 sprintf(tmp,"%d", who);
@@ -599,7 +625,7 @@ static void* test_scheduler_do(Cluster* cluster){
         }
     }
 }
-
+*/
 /*
 static void* pipeline(Cluster* cluster){
     printf("== cluster start pipe  on thread== \n");
@@ -718,9 +744,11 @@ static void* cluster_do(Cluster* cluster){
                  //###
                  Session* session;
                  session = create_session(new_session);
-
-                 str_len = read(session->session_iid, session->read_buffer, sizeof(session->read_buffer));
+                 //str_len = read_nowait(session->session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
+                 str_len = read(session->session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
+                 session->read_buffer[str_len] = '\0';
                 
+
                  if (str_len==0){
                      printf("close session timeout [%d]\n", new_session);
                      close(new_session);
@@ -758,13 +786,10 @@ static int submit_with_session(Cluster* cluster, void(*function)(void*), void* s
     session = session_p;
     new_job->function = function;
     new_job->info = session;
-    // ### job, session -> 
     push_back_sem(&cluster->job_queue, new_job);
-//    push_back(&cluster->job_queue, cluster->job_queue.has_job , new_job);
     return 0;
 
 }
-
 
 
 struct Session* create_session(int new_session_id ){
@@ -778,6 +803,7 @@ struct Session* create_session(int new_session_id ){
     }
 
     session->session_iid = (uintptr_t)new_session_id;
+    session->read_buffer[0] = '\0';
     return session;
 }
 
@@ -797,6 +823,7 @@ void task_fn(void* args){
     
     printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
     
+    
     file = find_file_only(session->read_buffer);
         
     if (file==NULL){
@@ -812,6 +839,8 @@ void task_fn(void* args){
         free(file);
         
      }
+
+     session->read_buffer[0]= '\0';
 }
 
 
@@ -821,25 +850,12 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
      */
     scheduler->len = 0;
     scheduler->num_lock = num_lock;
-/*
-    //scheduler -> has_job = (struct BinSemaphore** )malloc(num_lock*sizeof(struct BinSemaphore* ));;
 
-    for (int i=0; i< num_lock; i++){
-        semaphore_init(scheduler, &scheduler->has_job[i]); 
-        
-    }
-*/
+    sem_init(&scheduler->mutex, 0, num_lock);
     return 0;
 }
 
 
-static int semaphore_init(JobScheduler* scheduler, struct BinSemaphore** node){
-    *node = (struct BinSemaphore* )malloc(sizeof(struct BinSemaphore ));
-    bsem_init((*node), 0);
-
-
-    return 0;
-}
 
 static int worker_init(Cluster* cluster, struct Worker** thread, int id){
     *thread = (struct Worker*)malloc(sizeof(struct Worker));
@@ -1071,10 +1087,6 @@ struct Cluster* cluster_init(Control* control){
         free(cluster);
         return NULL;
     }
-    if (worker_queue_init(cluster,&cluster->worker_queue, num_worker)<0){
-        free(cluster);
-        return NULL;
-    }
      
     if (job_scheduler_init(&cluster->scheduler, cluster->num_worker) <0){
         free(cluster);
@@ -1089,9 +1101,6 @@ struct Cluster* cluster_init(Control* control){
         return NULL;
     }
    
-
-
-
 
     /*create stream on cluster*/
     if (async_stream_init(&cluster) < 0 ){
@@ -1172,16 +1181,13 @@ int main(){
 
     Cluster* cluster = cluster_init(control);
     
-//    pthread_create(&(cluster->pipe_thread), NULL, (void * (*)(void* )) pipeline, cluster);
-    pthread_create(&(cluster->pipe_thread), NULL, (void * (*)(void* )) pipe_connection, cluster);
-
-    //pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduler_do, cluster);
-    pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) test_scheduler_do, cluster);
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
+    pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduling, cluster);
+
 
     pthread_detach(cluster->main_thread);
-    pthread_detach(cluster->pipe_thread);
     pthread_detach(cluster->schedule_thread);
+
     while ( SERVICE_KEEPALIVE){
         continue;
 
