@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <fcntl.h>
 
+#include <semaphore.h>
 #include <pthread.h>
 #include <dirent.h>
 #define err(str) fprintf(stderr, str)
@@ -131,6 +132,9 @@ typedef struct JobQueue{
      has_job:: lock for job queue. broadcast to all thread
      
      */
+
+    sem_t mutex;
+
     pthread_mutex_t rxmutex;
     Job* front;
     Job* rear;
@@ -294,8 +298,17 @@ static void wait(BinSemaphore* bsem_p){
 /*--------------------------*/
 
 
+static int job_queue_init(JobQueue* job_queue){
+    job_queue -> len = 0;
+    job_queue -> front = NULL;
+    job_queue -> rear = NULL;
+    sem_init(&job_queue->mutex, 0, 0);
+    pthread_mutex_init(&job_queue->rxmutex, NULL);
+    return 0;
+}
 
-static int job_queue_init(JobQueue* job_queue_p){
+
+static int job_queue_init_old(JobQueue* job_queue_p){
     job_queue_p->len =0;
     job_queue_p->front = NULL;
     job_queue_p->rear = NULL;
@@ -305,12 +318,16 @@ static int job_queue_init(JobQueue* job_queue_p){
         err("job_queue_init():: could not allocate memory for binary semaphore in job queue");
         return -1;
     }
+    
+
 
     pthread_mutex_init(&(job_queue_p->rxmutex), NULL);
     bsem_init(job_queue_p->has_job, 0);
     
     return 0;
 }
+
+
 
 static int pipe_init(Cluster* cluster, int num_worker){
    
@@ -380,7 +397,7 @@ static void* pipe_connection(Cluster* cluster){
 static int worker_queue_init(Cluster* cluster, JobQueue* worker_queue, int num_worker){
     /*
      */
-    if (  job_queue_init(worker_queue) <0){
+    if (  job_queue_init_old(worker_queue) <0){
         return -1;
     }
 
@@ -394,6 +411,27 @@ static int worker_queue_init(Cluster* cluster, JobQueue* worker_queue, int num_w
 
     return 0;
 }
+
+
+static void push_back_sem(JobQueue* job_queue, struct Job* new_job){
+     
+    pthread_mutex_lock(&job_queue->rxmutex);
+    // sem_wait(&job_queue->mutex);
+    new_job->prev = NULL;
+    
+    if (job_queue->len==0){
+        job_queue->front = new_job;
+        job_queue->rear = new_job;
+    }
+    if (job_queue->len>=1){
+        job_queue->rear->prev = new_job;
+        job_queue->rear = new_job;
+    }
+    job_queue -> len ++ ;
+    sem_post(&job_queue->mutex);
+    pthread_mutex_unlock(&job_queue->rxmutex);
+}
+
 
 static void push_back(JobQueue* job_queue, BinSemaphore* has_job, struct Job* new_job){
     
@@ -428,6 +466,26 @@ static void push_back_worker(JobScheduler* scheduler,Worker* worker , struct Job
 static struct Job* pop_front_worker(Worker* self){
     Job* new_job = self->job;
     return new_job;
+}
+
+
+static struct Job* pop_front_sem(JobQueue* job_queue){
+    sem_wait(&job_queue->mutex);
+    
+    pthread_mutex_lock(&job_queue-> rxmutex);
+    Job* front = job_queue ->front;
+    if (job_queue->len==1){
+        job_queue->front = NULL;
+        job_queue->rear = NULL;
+        job_queue -> len = 0;
+    } 
+    else if (job_queue->len >=2){
+        job_queue -> front = front->prev;
+        job_queue -> len -- ;
+        
+    }
+    pthread_mutex_unlock(&job_queue->rxmutex);
+    return front;
 }
 
 static struct Job* pop_front(JobQueue* job_queue_p, BinSemaphore* has_job ){
@@ -522,9 +580,11 @@ static void* worker_do_passive(Worker* worker){
 static void* test_scheduler_do(Cluster* cluster){
     printf("==DEBUG cluster start scheduling on thread==\n");
     while (SERVICE_KEEPALIVE){
-        wait(cluster->job_queue.has_job);
+//        wait(cluster->job_queue.has_job);
+        Job* new_job = pop_front_sem(&cluster->job_queue);
+        printf("\t--debug job after \n");
         if (SERVICE_KEEPALIVE){
-            Job* new_job = pop_front(&cluster->job_queue, cluster->job_queue.has_job);
+//            Job* new_job = pop_front(&cluster->job_queue, cluster->job_queue.has_job);
             wait(cluster->worker_queue.has_job); 
             if (SERVICE_KEEPALIVE){
                 Job* worker = pop_front(&cluster->worker_queue, cluster->worker_queue.has_job);
@@ -699,7 +759,8 @@ static int submit_with_session(Cluster* cluster, void(*function)(void*), void* s
     new_job->function = function;
     new_job->info = session;
     // ### job, session -> 
-    push_back(&cluster->job_queue, cluster->job_queue.has_job , new_job);
+    push_back_sem(&cluster->job_queue, new_job);
+//    push_back(&cluster->job_queue, cluster->job_queue.has_job , new_job);
     return 0;
 
 }
