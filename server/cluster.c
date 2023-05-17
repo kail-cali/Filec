@@ -189,7 +189,6 @@ typedef struct Cluster{
 
     pthread_t main_thread;
     pthread_t schedule_thread;
-    pthread_t pipe_thread;
 
     pthread_mutex_t lock;
     pthread_cond_t idle;
@@ -208,7 +207,8 @@ typedef struct Cluster{
 
 
     /*stream event*/
-    struct epoll_event event_register;
+    int stream_event_fd;
+//    struct epoll_event event_register;
     struct epoll_event* stream_event_loop;
 
 
@@ -218,7 +218,7 @@ typedef struct Cluster{
     int** worker_pipe;
     int** cluster_pipe;
 
-    struct epoll_event pipe_register;
+  //  struct epoll_event pipe_register;
     struct epoll_event* pipe_events;
     int pipe_epoll_fd;
 
@@ -468,77 +468,57 @@ static void* cluster_do(Cluster* cluster){
     printf("\n==Cluster working on thread== \n");
     Control* control = cluster->control;
 
-    /*<D>epoll init temp */
-    int epoll_fd = epoll_create(control->max_epoll_event);
-    if (epoll_fd <0 ){
-        err("epoll init error\n ");
+    int batch;
+    struct epoll_event* stream_event_loop = cluster -> stream_event_loop;
 
-    }
-
-    struct epoll_event event;
-
-    event.events = EPOLLIN | EPOLLET;
-    event.data.fd = cluster->server_fd;
-
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, cluster->server_fd, &event) < 0){
-        err("epoll init error\n");
-    }
-
-    struct epoll_event epoll_events[control->max_epoll_event];
-    int batch4event;
-    
     while (SERVICE_KEEPALIVE && cluster->server_fd >0){
-        batch4event = epoll_wait(epoll_fd, epoll_events, control->max_epoll_event, control->session_timeout );
-        if (batch4event <0){
-            continue; //###
-
+        batch = epoll_wait(cluster->stream_event_fd, stream_event_loop, control->max_epoll_event, control->session_timeout );
+        if (batch <0){
+            continue; 
         }
 
-        for (int i =0; i <batch4event; i++){
-            if (epoll_events[i].data.fd==cluster->server_fd){
-                int new_session;
+        for (int i =0; i <batch; i++){
+            if (stream_event_loop[i].data.fd==cluster->server_fd){
+                int new_client;
                 int session_len;
-                /*<D> epoll init tmp*/
                 struct sockaddr_in client_addr;
 
                 session_len = sizeof(client_addr);
-                new_session = accept(cluster->server_fd, (struct sockaddr* )&client_addr, (socklen_t* )&session_len);
-                
-  //              int flags = fcntl(new_session, F_GETFL);
-//
-//                flags |= O_NONBLOCK;
-    //            if (fcntl(new_session, F_SETFL, flags)<0){
-      //              printf("while creating new session[%d] fcntl() error \n", new_session);
-        //            continue;
-          //      }
-                if (new_session <0){
+                new_client = accept(cluster->server_fd, (struct sockaddr* )&client_addr, (socklen_t* )&session_len);
+             /*   
+                int flags = fcntl(new_session, F_GETFL);
+
+                flags |= O_NONBLOCK;
+                if (fcntl(new_session, F_SETFL, flags)<0){
+                   printf("while creating new session[%d] fcntl() error \n", new_session);
+                   continue;
+                 }
+                 */
+                if (new_client <0){
                     continue;
                 }
                 struct epoll_event event;
                 event.events = EPOLLIN | EPOLLET;
-                // ### 
-                event.data.fd = new_session;
-                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_session, &event)<0){
+                event.data.fd = new_client;
+                if (epoll_ctl(cluster->stream_event_fd, EPOLL_CTL_ADD, new_client, &event)<0){
                     err("epoll ctl error\n");
                     continue;
-                    //###
                 }
 
             }
              else {
                  int str_len;
-                 int new_session = epoll_events[i].data.fd;
-                 //###
+                 int new_client = stream_event_loop[i].data.fd;
                  Session* session;
-                 session = create_session(new_session);
+                 session = create_session(new_client);
                  str_len = read(session->session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
                  session->read_buffer[str_len] = '\0';
                 
 
                  if (str_len==0){
-                     printf("close session timeout [%d]\n", new_session);
-                     close(new_session);
-                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, new_session, NULL);
+                     printf("close session timeout [%d]\n", new_client);
+                     close(new_client);
+                     epoll_ctl(cluster->stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
 
                  }
                  else{
@@ -661,7 +641,24 @@ static int worker_init(Cluster* cluster, struct Worker** thread, int id){
 
 
 static int epoll_init(Cluster* cluster, int server_fd){
+    cluster -> stream_event_fd = epoll_create(cluster->control->max_epoll_event);
+    if (cluster -> stream_event_fd <0){
+        err("epoll init error \n");
+    }
+
+    cluster -> stream_event_loop = (struct epoll_event* )malloc(cluster->control->max_epoll_event * sizeof(struct epoll_event));
     
+    if (cluster->stream_event_loop ==NULL){
+        err("stream event loop not allocated at memory \n");
+        return -1;
+    }
+    struct epoll_event event_register;
+    event_register.events = EPOLLIN | EPOLLET;
+    event_register.data.fd = server_fd;
+    if (epoll_ctl(cluster->stream_event_fd, EPOLL_CTL_ADD, server_fd, &event_register)<0){
+        err("stream could not register to epoll \n");
+    }
+
     return 0;
 
 }
