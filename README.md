@@ -2,11 +2,10 @@
 `File Transfer Server based on spark architecture`
 
 ## Feature
-- have Non-blocking Listen server
+- MulitPlexing-Duplexing Server with epoll and n-full-duplex pipe
 - virtualized network and process
-- Job Sheduleing at server cluster
-- have  Multi-Plexing feature for processing multi-session
-- worked on (thread-pool & ascio) main-cluster and  child worker thread
+- Job Sheduleing at server cluster with FIFO
+- Can Handle with multi-session
 
 
 ## api
@@ -16,22 +15,29 @@
 
 ## Acrciteture
 `There is 3 Sub-Thread for each middle-ware server`
+- pair-wise Pipe connection with thread-pool (with no lock wait)
 - Listen Server
-- Pipe for multi-Worker thread 
-- Job Scheduler 
+- Job Scheduler(Just FIFO)
 
 ## How To Run
+
 - how to compile
 - at root dir `./FileC`
 `source MakeFile && source MakeClient`
+
 - how to run
-server
-`./start_server`
+</B>Server </>
+```shell
+./start_server
 
-and client
-`./start_client`
+```
 
-if you have your own specific inet and port,
-modified `./server/control.txt'
-`
+</B>Client
+```shell
+./start_client
+```
+
+IMPORTANT
+- SECRET NOT INCLUDED IN GIT, WRITE SECRET ON YOUR CONTROL.TXT
+- `./server/control.txt'`
 

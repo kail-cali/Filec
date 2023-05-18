@@ -1,5 +1,7 @@
 #include <unistd.h>
 #include <stdint.h>
+#include <semaphore.h>
+
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +69,11 @@ typedef struct JobQueue{
     pthread_mutex_t rxmutex;
     Job* front;
     Job* rear;
+
+
+    sem_t mutex;
+    
+
     BinSemaphore* has_job;
     int len;
 } JobQueue;
@@ -142,7 +149,7 @@ static int job_queue_init(JobQueue* job_queue_p);
 static volatile int SERVICE_KEEPALIVE;
 /*-------------------------*/
 
-
+/*
 
 static int job_queue_init(JobQueue* job_queue_p){
     
@@ -156,6 +163,19 @@ static int job_queue_init(JobQueue* job_queue_p){
     }
     pthread_mutex_init(&(job_queue_p->rxmutex), NULL);
     bsem_init(job_queue_p->has_job, 0);
+    return 0;
+}
+*/
+
+static int job_queue_init(JobQueue* job_queue){
+    job_queue -> front = NULL;
+    job_queue -> rear = NULL;
+    job_queue -> len = 0;
+    
+    pthread_mutex_init(&job_queue->rxmutex, NULL);
+    sem_init(&job_queue->mutex, 0, 0);
+
+
     return 0;
 }
 
@@ -189,8 +209,26 @@ static void wait(BinSemaphore* bsem_p){
 
 }
 
-static void push_back(JobQueue* job_queue, BinSemaphore* has_job, Job* new_job){
+static void push_back(JobQueue* job_queue, Job* new_job){
+    pthread_mutex_lock(&job_queue->rxmutex);
 
+    new_job -> prev = NULL;
+    if (job_queue->len ==0){
+        job_queue ->front = new_job;
+        job_queue ->rear = new_job;
+    }
+    else if (job_queue-> len >= 1){
+        job_queue ->rear -> prev = new_job;
+        job_queue ->rear = new_job;
+    }
+    job_queue -> len ++ ;
+    sem_post(&job_queue->mutex);
+    pthread_mutex_unlock(&job_queue->rxmutex);
+
+}
+/*
+static void push_back(JobQueue* job_queue, BinSemaphore* has_job, Job* new_job){
+    
     pthread_mutex_lock(&job_queue->rxmutex);
     new_job -> prev = NULL;
     if (job_queue->len==0){
@@ -206,10 +244,31 @@ static void push_back(JobQueue* job_queue, BinSemaphore* has_job, Job* new_job){
     pthread_mutex_unlock(&job_queue->rxmutex);
 }
 
+*/
 
 static void push(JobQueue* job_queue_p, struct Job* new_job){
 }
 
+
+static struct Job* pop_front(JobQueue* job_queue){
+    sem_wait(&job_queue->mutex);
+    pthread_mutex_lock(&job_queue->rxmutex);
+    
+    Job* front = job_queue -> front;
+    if (job_queue -> len==1){
+        job_queue -> front =NULL;
+        job_queue -> rear = NULL;
+        job_queue -> len = 0;
+    }
+    else if (job_queue -> len >=2){
+        job_queue -> front = front ->prev;
+        job_queue -> len --;
+    }
+    pthread_mutex_unlock(&job_queue->rxmutex);
+    return front;
+}
+
+/*
 static struct Job* pop_front(JobQueue* job_queue, BinSemaphore* has_job){
     pthread_mutex_lock(&job_queue->rxmutex);
     Job* front_job = job_queue->front;
@@ -229,7 +288,7 @@ static struct Job* pop_front(JobQueue* job_queue, BinSemaphore* has_job){
     return front_job;
 
 }
-
+*/
 static struct Job* pop(JobQueue* job_queue_p){
 }
 
@@ -282,11 +341,12 @@ static void* context_do(Context* context){
     Driver* driver = context->driver;
     
     while (SERVICE_KEEPALIVE){
-        wait(driver->job_queue.has_job);
+//        wait(driver->job_queue.has_job);
+        Job* new_job = pop_front(&driver->job_queue);
         if (SERVICE_KEEPALIVE && context->fd>=0){
             void(* fn)(void* );
             void* args;
-            Job* new_job = pop_front(&driver->job_queue, driver->job_queue.has_job);
+  //          Job* new_job = pop_front(&driver->job_queue, driver->job_queue.has_job);
             if (new_job){
                 fn = new_job->function;
                 _set_session(context, new_job->query);
@@ -374,7 +434,8 @@ static int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
     new_job->function =function_p;
     new_job->query = query;
     Driver* driver_p = driver;
-    push_back(&driver->job_queue, driver->job_queue.has_job, new_job);
+//    push_back(&driver->job_queue, driver->job_queue.has_job, new_job);
+    push_back(&driver->job_queue, new_job);
 
     return 0;
 }
@@ -400,6 +461,7 @@ static int sample(Driver* driver){
 
     while ( fscanf(fptr, "%s", buf)==1 )
         if (i < 10){
+            printf("---debug check buf %s\n", buf);
             done =  add_query(driver, request, (void* )(char* )buf);
         i+=1;
         }
@@ -478,7 +540,7 @@ struct Driver* driver_init(int num_context){
 }
 
 int main(){
-    Driver* driver  = driver_init(1);
+    Driver* driver  = driver_init(2);
     printf("--------------runing---------------- \n");
     /*test code on sample */
     sample(driver);
