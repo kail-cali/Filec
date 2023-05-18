@@ -99,6 +99,7 @@ typedef struct Job{
 
 } Job;
 
+
 typedef struct JobScheduler{
 
     int num_lock;
@@ -199,7 +200,9 @@ typedef struct Cluster{
     JobQueue job_queue;
 
 
+
     JobScheduler scheduler;
+
 
     int server_fd;
     struct sockaddr_in serv_addr;
@@ -318,17 +321,15 @@ static void push_back(JobQueue* job_queue, struct Job* new_job){
 
 
 
-static void push_back_worker(Worker* worker , struct Job* new_job){
-    
-    worker->job = new_job;
 
+static void push_back_worker(Worker* worker , struct Job* new_job){
+    worker->job = new_job;
 }
 
 static struct Job* pop_front_worker(Worker* self){
     Job* new_job = self->job;
     return new_job;
 }
-
 
 static struct Job* pop_front(JobQueue* job_queue){
     sem_wait(&job_queue->mutex);
@@ -348,12 +349,6 @@ static struct Job* pop_front(JobQueue* job_queue){
     pthread_mutex_unlock(&job_queue->rxmutex);
     return front;
 }
-
-
-
-
-
-
 
 static int pipe_init(Cluster* cluster, int num_worker){
    
@@ -533,13 +528,20 @@ static void* cluster_do(Cluster* cluster){
 }
 
 
+
 static void* test_cluster_do(Cluster* cluster){
 
 }
 
-
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p){
     
+    /*
+     Create session and push job to job-queue
+    
+     - Create job which container for processing query
+     - Create session wihch manage life-cycle of seesion, client fd, read-buffer
+     - Pusch back job (contianer) into queue
+     */
     Job* new_job;
     new_job =(struct Job*)malloc(sizeof(struct Job));
     
@@ -610,6 +612,7 @@ void task_fn(void* args){
 }
 
 
+
 static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     /*
     
@@ -620,7 +623,6 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     sem_init(&scheduler->mutex, 0, num_lock);
     return 0;
 }
-
 
 
 static int worker_init(Cluster* cluster, struct Worker** thread, int id){
@@ -963,6 +965,9 @@ int main(){
 
     Cluster* cluster = cluster_init(control);
     
+
+
+
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
     pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduling, cluster);
 
