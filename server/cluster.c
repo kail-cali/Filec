@@ -46,11 +46,26 @@ typedef struct Control{
 } Control;
 
 typedef struct Tokenizer{
-
+    char prefix;
+    char suffix;
+    
+    char no_file_token; // <H>
+    char find_file_token; // <C>
+     
 
 } Tokenizer;
 
+typedef struct HashNode{
+    char* key;
+    char* value;
 
+} HashNode;
+
+typedef struct HashTable{
+    HashNode** items;
+    int size;
+    int count;
+} HashTable;
 
 typedef struct File{
     /*
@@ -113,7 +128,7 @@ typedef struct JobQueue{
     
      Notifiy new-job to worker-thread  with job queue and binary semaphore
      
-     if new job has come, submited by Cluster shaped of Session. and broadcast them to all alive-work-thread
+     if new job has come, submited by cluster shaped of Session. and broadcast them to all alive-work-thread
 
 
      len:: left job
@@ -276,6 +291,26 @@ static int read_nowait(int fd, void *buf, size_t len){
 
 
 */
+
+
+
+/*--------------file hash---------*/
+
+void free_item(HashNode* item){
+
+    free(item->key);
+    free(item->value);
+    free(item);
+}
+
+void free_table(HashTable* table){
+
+
+
+    free(table);
+}
+
+/*--------------------------*/
 
 
 static void sem_reset(sem_t* mutex, int value){
@@ -621,6 +656,21 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
 }
 
 
+HashTable* hash_init(int size){
+    HashTable* table = (HashTable* )malloc(sizeof(HashTable));
+    
+    table->size = size;
+    table->count = 0;
+    table->items = (HashNode**)calloc(table->size, sizeof(HashNode* ));
+    for (int i=0; i < table->size; i++){
+        table -> items[i] = NULL;
+    }
+
+    return table;
+
+}
+
+
 
 static int worker_init(Cluster* cluster, struct Worker** thread, int id){
     *thread = (struct Worker*)malloc(sizeof(struct Worker));
@@ -952,6 +1002,22 @@ static int control_init(Control* control){
 
 }
 
+static int flush_all(Cluster* cluster){
+
+    free(cluster->control);
+//    sem_destroy(cluster->job_queue.mutex);
+    // Job queue
+    //
+    // Job Scheduler
+    
+    free(cluster->scheduler);
+
+    free(cluster->worker);
+    free(cluster);
+
+    return 0;
+
+}
 
 int main(){
     Control* control;
