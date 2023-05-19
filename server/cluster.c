@@ -292,6 +292,14 @@ static int read_nowait(int fd, void *buf, size_t len){
 
 */
 
+void print_struct(void* structure){
+
+    void(* st);
+
+    
+
+}
+
 
 
 /*--------------file hash---------*/
@@ -821,6 +829,29 @@ struct File* find_file_only(char* file_name){
     fclose(fptr);
     return file;
 }
+
+
+struct HashNode* create_item(char* key, char* value){
+    HashNode* item = (HashNode* )malloc(sizeof(HashNode));
+
+    item ->key = (char* )malloc(strlen(key)+1);
+    item -> value = (char* )malloc(strlen(value)+1);
+
+    strcpy(item->key, key);
+    strcpy(item->value, value);
+
+    return item;
+}
+
+struct HashTable* create_table(int size){
+    HashTable* table;
+
+    table = hash_init(size);
+    return table;
+}
+
+
+
 
 /*
 struct File* find_file(char* file_name){
