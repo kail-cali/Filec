@@ -305,8 +305,15 @@ void free_item(HashNode* item){
 
 void free_table(HashTable* table){
 
+    for (int i=0; i < table->size; i++){
+        HashNode* item = table->items[i];
+        if (item != NULL){
+            free_item(item);
+        }
 
+    }
 
+    free(table->items);
     free(table);
 }
 
@@ -1002,19 +1009,57 @@ static int control_init(Control* control){
 
 }
 
-static int flush_all(Cluster* cluster){
+static int free_queue(JobQueue* jobqueue){
+    // job queue element free needed
+    /*
+    for (int i=0; i<jobqueue->len; i++){
+        Job* front = pop_front(jobqueue);
 
-    free(cluster->control);
-//    sem_destroy(cluster->job_queue.mutex);
-    // Job queue
-    //
-    // Job Scheduler
+        free(front);
+
+    }
+    */
+    sem_destroy(&jobqueue->mutex);
+    pthread_mutex_destroy(&jobqueue->rxmutex);
+    free(jobqueue);
+    return 0;
+}
+
+static int free_worker(Worker* worker){
+    if (worker->job != NULL){
+        free(worker->job);
+    }
+//    pthread_mutex_destroy(worker.pthread);
+    free(worker);
+    return 0;
+}
+
+
+static int free_cluster(Cluster* cluster){
     
-    free(cluster->scheduler);
+    for (int i =0; i < cluster->num_worker; i++){
 
-    free(cluster->worker);
+        Worker* worker = cluster->workers[i];
+
+        if (worker != NULL){
+            free_worker(worker);
+        }
+    }
+
     free(cluster);
+    return 0;
+}
 
+
+static int flush_all(Cluster* cluster){
+    SERVICE_KEEPALIVE = 0;
+    // Job Scheduler
+    sem_destroy(&cluster->scheduler.mutex);    
+    free(&cluster->scheduler);
+    free_queue(&cluster->job_queue);
+    free(cluster->control);
+
+    free_cluster(cluster);
     return 0;
 
 }
