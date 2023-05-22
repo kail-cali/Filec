@@ -26,7 +26,7 @@
 /*Global*/
 
 static volatile int SERVICE_KEEPALIVE;  // Service status used for run forever or terminate program
-
+const int CAPACITY = 100;
 /*----------class-----------*/
 
 typedef struct Control{
@@ -324,6 +324,20 @@ void free_table(HashTable* table){
     free(table->items);
     free(table);
 }
+
+
+unsigned long hash_function(char *str){
+    unsigned long i = 0;
+
+    for (int j = 0; str[j]; j++)
+        i += str[j];
+
+    return i % CAPACITY;
+                
+}
+
+
+
 
 /*--------------------------*/
 
@@ -702,6 +716,20 @@ static int worker_init(Cluster* cluster, struct Worker** thread, int id){
 
     return 0;
 }
+
+
+static int set_event_loop(Cluster* cluster, int epoll_fd, int fd, int max_event){
+    /* high level api for epol */
+    epoll_fd =  epoll_create(max_event);
+    if (epoll_fd <0){
+        err("set event loop error \n");
+
+    }
+    struct epoll_event event_register;
+
+    return 0;
+}
+
 
 
 static int epoll_init(Cluster* cluster, int server_fd){
