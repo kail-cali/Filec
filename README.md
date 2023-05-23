@@ -26,7 +26,7 @@
 `source MakeFile && source MakeClient`
 
 - how to run
-</B>Server </>
+</B>Server
 ```shell
 ./start_server
 

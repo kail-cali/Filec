@@ -726,9 +726,15 @@ static int set_event_loop(Cluster* cluster, int epoll_fd, int fd, int max_event)
 
     }
     struct epoll_event event_register;
-
+    event_register.events = EPOLLIN | EPOLLET;
+    event_register.data.fd = fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event_register)<0){
+        err("set event loop ctl error \n");
+        
+    }
     return 0;
 }
+
 
 
 
