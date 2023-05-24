@@ -292,13 +292,6 @@ static int read_nowait(int fd, void *buf, size_t len){
 
 */
 
-void print_struct(void* structure){
-
-    void(* st);
-
-    
-
-}
 
 
 
@@ -336,7 +329,13 @@ unsigned long hash_function(char *str){
                 
 }
 
-
+static unsigned int hash_function2(char* key)
+{
+	unsigned int h = 5381;
+	while(*(key++))
+		h = ((h << 5) + h) + (*key);
+	return h;
+}
 
 
 /*--------------------------*/
@@ -446,9 +445,8 @@ static int pipe_init(Cluster* cluster, int num_worker){
             err("pipe epoll init error \n");
         }
     } 
-    
-    
-}
+    return 0; 
+}    
 
 static void* scheduling(Cluster* cluster){
     /*
@@ -457,7 +455,6 @@ static void* scheduling(Cluster* cluster){
      */
     printf("==(debug) Scheduler Start on Thread == \n");
     int alives;
-    int status;
     char who[2];
     char notify[2];
 
@@ -489,7 +486,9 @@ static void* scheduling(Cluster* cluster){
     }
 }
 
-
+static void* file_event_handler(Worker* worker){
+    
+}
 
 static void* worker_do_pipe(Worker* worker){
 
@@ -526,7 +525,11 @@ static void* worker_do_pipe(Worker* worker){
 
     }
 }
+static void* listen_handler(Cluster* cluster){
 
+
+    
+}
 static void* cluster_do(Cluster* cluster){
     printf("\n==Cluster working on thread== \n");
     Control* control = cluster->control;
@@ -738,6 +741,7 @@ static int set_event_loop(Cluster* cluster, int epoll_fd, int fd, int max_event)
 
 
 
+
 static int epoll_init(Cluster* cluster, int server_fd){
     cluster -> stream_event_fd = epoll_create(cluster->control->max_epoll_event);
     if (cluster -> stream_event_fd <0){
@@ -802,43 +806,6 @@ static int async_stream_init(Cluster** cluster_p){
     return 0;
 }
 
-/*
-static int _stream_init(Cluster** cluster_p){
-    Cluster* cluster = (*cluster_p);
-    cluster->port = 32209;
-    int opt = 6;
-    int server_fd;
-    
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd <0){
-        perror("stream_init() socket create failed \n");
-        return -1;
-    }
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
-        perror("set socket opt\n");
-        return -1;
-    }
-    cluster->serv_addr.sin_family=AF_INET;
-    cluster->serv_addr.sin_addr.s_addr = INADDR_ANY;
-    cluster->serv_addr.sin_port = htons(cluster->port);
-    if (bind(server_fd, (struct sockaddr*)&(cluster->serv_addr), sizeof((cluster->serv_addr)))<0){
-        err("stream_init : Bind Failed\n");
-        return -1;
-    }
-
-    if (listen(server_fd, 3)<0){
-        perror("listen Failed\n");
-        return -1;
-    }
-
-    cluster -> server_fd = server_fd;
-    if (epoll_init(cluster, server_fd)<0){
-        perror("set epoll Failed\n");
-        return -1;
-    }
-    return 0;
-}
-*/
 
 struct File* find_file_only(char* file_name){
     File* file;
