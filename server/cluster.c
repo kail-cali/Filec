@@ -41,6 +41,8 @@ typedef struct Control{
     int num_lock;
     int scheduling_mode;
     char root[20];
+    char file_root[20];
+    int hash_size;
 
 
 } Control;
@@ -163,7 +165,7 @@ typedef struct Worker{
      */
     pthread_t pthread;
     int id; // logical index for worker
-
+    int status; // check idle status, 0 is Working , 1 is Idle
     Job* job; // <v.0.2>private container for new job 
 
 
@@ -210,6 +212,8 @@ typedef struct Cluster{
     Worker** workers;
     int num_worker;
 
+
+    int* job_queue_fd;
     JobQueue job_queue;
 
 
@@ -230,11 +234,15 @@ typedef struct Cluster{
 
 
     int** worker_pipe;
-    int** cluster_pipe;
+    int* cluster_pipe;
 
   //  struct epoll_event pipe_register;
     struct epoll_event* pipe_events;
     int pipe_epoll_fd;
+
+
+    /* file hash*/
+    HashTable* filetable;
 
 } Cluster;
 
@@ -345,11 +353,22 @@ static void sem_reset(sem_t* mutex, int value){
     sem_init(mutex, 0, value);
 }
 
-
 /*--------------------------*/
 
 
-static int job_queue_init(JobQueue* job_queue){
+static int job_queue_init(Cluster* cluster, JobQueue* job_queue){
+   
+    cluster -> job_queue_fd = (int* )malloc(2 *sizeof(int));
+    pipe(cluster->job_queue_fd);
+    struct epoll_event register_ ;
+    register_.events = EPOLLIN | EPOLLET;
+    register_.data.fd = cluster -> job_queue_fd[0];
+    if (epoll_ctl(cluster->pipe_epoll_fd, EPOLL_CTL_ADD, cluster->job_queue_fd[0], &register_)<0){
+        err("jobqueue fd init error\n");
+        return -1;
+    }
+     
+
     job_queue -> len = 0;
     job_queue -> front = NULL;
     job_queue -> rear = NULL;
@@ -393,7 +412,7 @@ static struct Job* pop_front_worker(Worker* self){
 
 
 static struct Job* pop_front(JobQueue* job_queue){
-    sem_wait(&job_queue->mutex);
+//    sem_wait(&job_queue->mutex);
     
     pthread_mutex_lock(&job_queue-> rxmutex);
     Job* front = job_queue ->front;
@@ -414,102 +433,106 @@ static struct Job* pop_front(JobQueue* job_queue){
 
 
 
-
-
-
 static int pipe_init(Cluster* cluster, int num_worker){
    
     
     cluster->worker_pipe = (int** )malloc(num_worker * sizeof(int* ));
-    cluster->cluster_pipe = (int** )malloc(num_worker * sizeof(int* ));
 
+    cluster->cluster_pipe = (int* )malloc(2 * sizeof(int));
     
+    pipe(cluster->cluster_pipe);
+
     cluster ->pipe_epoll_fd = epoll_create(1024);
 
     cluster ->  pipe_events = (struct epoll_event* )malloc(1024*sizeof(struct epoll_event));
     
+    struct epoll_event pipe_register;
+    pipe_register.events = EPOLLIN | EPOLLET;
+    pipe_register.data.fd = cluster -> cluster_pipe[0];
+    if (epoll_ctl(cluster->pipe_epoll_fd, EPOLL_CTL_ADD, cluster ->cluster_pipe[0], &pipe_register)<0){
+        err("pipe init error \n");
+    }
     
+
     for (int i=0; i<num_worker; i++){
         cluster->worker_pipe[i] = (int* )malloc(2 * sizeof(int));
-        cluster->cluster_pipe[i] = (int* )malloc(2 * sizeof(int));
-        
         pipe(cluster->worker_pipe[i]);
-        pipe(cluster->cluster_pipe[i]);
-
         
-        struct epoll_event pipe_register;
-        pipe_register.events = EPOLLIN | EPOLLET;
-        pipe_register.data.fd = cluster -> cluster_pipe[i][0];
-        if (epoll_ctl(cluster->pipe_epoll_fd, EPOLL_CTL_ADD, cluster->cluster_pipe[i][0], &pipe_register)<0){
-
-            err("pipe epoll init error \n");
-        }
     } 
     return 0; 
 }    
 
-static void* scheduling(Cluster* cluster){
-    /*
-     1)Multi-plexing thread with full-duplex pipe
-     2) Job Scheduling with FIFO
-     */
-    printf("==(debug) Scheduler Start on Thread == \n");
-    int alives;
-    char who[2];
+static void* cluster_manager(Cluster* cluster){
+    printf("===  Cluster Manager Starot on Thread === \n");
+    int batch;
     char notify[2];
-
-
+    char new[2];
+    int done= 1;
+    char busy_msg[100] = {0};
+    snprintf(busy_msg, 100, "<nsf> Server Busy Now, redirect later");
     while (SERVICE_KEEPALIVE){
-        alives = epoll_wait(cluster->pipe_epoll_fd, cluster->pipe_events, cluster->num_worker, cluster-> control->session_timeout);
-        if (alives <0){
-            err("--Scheduling -- epoll wait error \n");
+        batch = epoll_wait(cluster->pipe_epoll_fd, cluster -> pipe_events, 1024, cluster->control->session_timeout);     
+        if (batch < 0){
+            err("--manager batch fd error found \n");
             continue;
         }
-        for (int i=0; i < alives; i++){
+        for (int i =0; i <batch; i++){
+            if (cluster->pipe_events[i].data.fd == cluster->job_queue_fd[0]){
+                done = 1;
+                read(cluster->job_queue_fd[0], new, sizeof(new));
+                new[0] = '\0';
 
-            read(cluster-> pipe_events[i].data.fd, who, sizeof(who));
-            int worker_id = atoi(who);
-            who[0] = '\0';
+                Job* new_job = pop_front(&cluster -> job_queue);
+                for (int j=0; j <cluster->num_worker; j++){
+                    if (cluster->workers[j]->status == 1){
+                        if (SERVICE_KEEPALIVE){
+                            push_back_worker(cluster->workers[j], new_job);
+                            done =0;
+                            write(cluster-> worker_pipe[j][1], notify, sizeof(notify));
+                        }             
+                        break;
+                    }
+               }
+                if (done==1){
+                    Session* session = new_job->info;
 
-            // wait until new job has published
-            Job*  new_job = pop_front(&cluster-> job_queue);
+                    send(session->session_iid, busy_msg, strlen(busy_msg),0); 
+                    printf("\nWorker busy now close session[%ld] \n", session->session_iid);
+                    close(session->session_iid);
+                    free(new_job->info);
+                    free(new_job);
 
-            if (SERVICE_KEEPALIVE){
-                push_back_worker(cluster->workers[worker_id], new_job);
-                sprintf(notify, "%d", worker_id);
-                write(cluster->worker_pipe[worker_id][1], notify, sizeof(notify));
-                notify[0] = '\0';
+                }
+                
+
             }
-
-
         }
     }
+    
 }
+
+
 
 static void* file_event_handler(Worker* worker){
     
 }
 
-static void* worker_do_pipe(Worker* worker){
 
+
+static void* worker_handler(Worker* worker){
     char worker_name[16] = {0};
     snprintf(worker_name, 16, "worker#%d", worker->id);
     Cluster* cluster = worker -> cluster;
-    int self = worker -> id;
+    int self = worker ->id;
     char stage[2];
-    char notify[2];
-    sem_wait(&cluster->scheduler.mutex); 
-    
-    notify[0] = '\0';
-    sprintf(notify,"%d", self);
-    write(cluster->cluster_pipe[self][1], notify, sizeof(notify));
 
     while (SERVICE_KEEPALIVE){
-        int status = read(cluster->worker_pipe[self][0], stage, sizeof(stage) );
+        int status = read(cluster->worker_pipe[self][0], stage, sizeof(stage));
         if (status <0){
-            printf("read status errer \n");
+            printf("read error while handling worker thread \n");
             continue;
         }
+        worker -> status = 0; //busy status 
         void(* fn)(void*);
         void* args;
         Job* new_job = pop_front_worker(worker);
@@ -521,87 +544,74 @@ static void* worker_do_pipe(Worker* worker){
             free(new_job->info);
             free(new_job);
         }
-        write(cluster->cluster_pipe[self][1], notify, sizeof(notify));
+        worker -> status = 1;
 
     }
 }
+
+
+
+
+
 static void* listen_handler(Cluster* cluster){
-
-
-    
-}
-static void* cluster_do(Cluster* cluster){
-    printf("\n==Cluster working on thread== \n");
-    Control* control = cluster->control;
-
+    /*at cluster do listen handing*/
+    printf("=== Listen Handler Working on Thread ===\n");
+    Control* control = cluster -> control;
     int batch;
+    char notify[2] = {1};
     struct epoll_event* stream_event_loop = cluster -> stream_event_loop;
 
     while (SERVICE_KEEPALIVE && cluster->server_fd >0){
-        batch = epoll_wait(cluster->stream_event_fd, stream_event_loop, control->max_epoll_event, control->session_timeout );
+        batch = epoll_wait(cluster -> stream_event_fd, stream_event_loop, control->max_epoll_event, control->session_timeout);
         if (batch <0){
-            continue; 
+            err("Listen Handelr error \n");
+            continue;
         }
-
-        for (int i =0; i <batch; i++){
-            if (stream_event_loop[i].data.fd==cluster->server_fd){
+        for (int i =0; i<batch; i++){
+            if (stream_event_loop[i].data.fd == cluster ->server_fd){
                 int new_client;
                 int session_len;
                 struct sockaddr_in client_addr;
 
                 session_len = sizeof(client_addr);
-                new_client = accept(cluster->server_fd, (struct sockaddr* )&client_addr, (socklen_t* )&session_len);
-             /*   
-                int flags = fcntl(new_session, F_GETFL);
+                new_client = accept(cluster -> server_fd, (struct sockaddr* )&client_addr, (socklen_t* )&session_len);
 
-                flags |= O_NONBLOCK;
-                if (fcntl(new_session, F_SETFL, flags)<0){
-                   printf("while creating new session[%d] fcntl() error \n", new_session);
-                   continue;
-                 }
-                 */
-                if (new_client <0){
+                if(new_client <0){
                     continue;
                 }
                 struct epoll_event event;
                 event.events = EPOLLIN | EPOLLET;
                 event.data.fd = new_client;
                 if (epoll_ctl(cluster->stream_event_fd, EPOLL_CTL_ADD, new_client, &event)<0){
-                    err("epoll ctl error\n");
+                    err("epoll ctl error \n");
                     continue;
                 }
-
             }
-             else {
-                 int str_len;
-                 int new_client = stream_event_loop[i].data.fd;
-                 Session* session;
-                 session = create_session(new_client);
-                 str_len = read(session->session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
-                 session->read_buffer[str_len] = '\0';
-                
+            else {
+                int str_len;
+                int new_client = stream_event_loop[i].data.fd;
+                Session* session;
+                session = create_session(new_client);
+                str_len = read(session -> session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
+                session -> read_buffer[str_len] = '\0';
 
-                 if (str_len==0){
-                     printf("close session timeout [%d]\n", new_client);
-                     close(new_client);
-                     epoll_ctl(cluster->stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
 
-                 }
-                 else{
-                    submit_with_session(cluster, task_fn, (void* )(uintptr_t)session);
-                 }
-
-             }
-         }
-
+                if (str_len==0){
+                    printf("close session timeout[%d] \n", new_client);
+                    close(new_client);
+                    epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
+                }
+                else {
+                    submit_with_session(cluster,task_fn, (void*)(uintptr_t)session);
+                    write(cluster-> job_queue_fd[1], notify, sizeof(notify));
+                }
+            }
+        
+        }
+    
     }
-
 }
 
-
-static void* test_cluster_do(Cluster* cluster){
-
-}
 
 
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p){
@@ -639,6 +649,13 @@ struct Session* create_session(int new_session_id ){
     return session;
 }
 
+
+void task_find_file(void* args){
+    Session* session = (Session* ) args;
+    File* file;
+
+    
+}
 
 void task_fn(void* args){
     /*
@@ -686,11 +703,46 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     sem_init(&scheduler->mutex, 0, num_lock);
     return 0;
 }
+static int update_hash(HashTable* table, char* file_path, char* d_name){
 
 
-HashTable* hash_init(int size){
-    HashTable* table = (HashTable* )malloc(sizeof(HashTable));
+    return 0;
+}
+static int file_hashing_init(HashTable* table, Control* control){
+    char file_path[1024] = {0};
+    DIR* file_read_fd;
+    FILE* fptr;
+    char buf[1024];
+
+    struct dirent* connector;
+    file_read_fd = opendir(control->file_root);
+    if (file_read_fd==NULL){
+        err("file root does not exists \n");
+        return -1;
+    }
+
+    while ((connector = readdir(file_read_fd)) != NULL){
+        file_path[0] = '\0'; 
+        snprintf(file_path, strlen(control->file_root)+1, "%s", control->file_root);
+        snprintf(file_path, strlen(connector->d_name)+1, "%s", connector->d_name);
+        fptr = fopen(file_path, "r");
+        if (fptr ==NULL){
+            err("file open error \n");
+            continue;
+        }
+        buf[0] = '\0';
+        fread(buf, 1, sizeof(buf), fptr);
+        fclose(fptr);
+
+        
+    }
+      
     
+    return 0;
+}
+
+HashTable* hash_init( int size){
+    HashTable* table = (HashTable* )malloc(sizeof(HashTable));
     table->size = size;
     table->count = 0;
     table->items = (HashNode**)calloc(table->size, sizeof(HashNode* ));
@@ -710,11 +762,12 @@ static int worker_init(Cluster* cluster, struct Worker** thread, int id){
         err("worker_init():: allocate worker on memory failed");
         return -1;
     }
-    
+
     (*thread) -> cluster = cluster;
     (*thread) -> id = id;
+    (*thread) -> status = 1;
 
-    pthread_create(&(*thread)->pthread, NULL, (void * (*)(void* )) worker_do_pipe, (*thread));
+    pthread_create(&(*thread)->pthread, NULL, (void * (*)(void* )) worker_handler, (*thread));
     pthread_detach((*thread)->pthread);
 
     return 0;
@@ -728,12 +781,14 @@ static int set_event_loop(Cluster* cluster, int epoll_fd, int fd, int max_event)
         err("set event loop error \n");
 
     }
+
+
     struct epoll_event event_register;
     event_register.events = EPOLLIN | EPOLLET;
     event_register.data.fd = fd;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event_register)<0){
         err("set event loop ctl error \n");
-        
+
     }
     return 0;
 }
@@ -749,7 +804,7 @@ static int epoll_init(Cluster* cluster, int server_fd){
     }
 
     cluster -> stream_event_loop = (struct epoll_event* )malloc(cluster->control->max_epoll_event * sizeof(struct epoll_event));
-    
+
     if (cluster->stream_event_loop ==NULL){
         err("stream event loop not allocated at memory \n");
         return -1;
@@ -776,11 +831,11 @@ static int async_stream_init(Cluster** cluster_p){
         return -1;
     } 
 
-   // int flags = fcntl(server_fd, F_GETFL);
-   // if (fcntl(server_fd, F_SETFL, flags)<0){
+    // int flags = fcntl(server_fd, F_GETFL);
+    // if (fcntl(server_fd, F_SETFL, flags)<0){
     //    return -1;
-   // }
-    
+    // }
+
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
         perror("set socket opt\n");
         return -1;
@@ -814,7 +869,7 @@ struct File* find_file_only(char* file_name){
     char* path = "./server/book_file/";
     snprintf(file_path, strlen(path)+1, "%s", path);
     strcat(file_path, file_name);
-    
+
     FILE* fptr;
     fptr = fopen(file_path, "r");
     if (fptr==NULL){
@@ -824,7 +879,7 @@ struct File* find_file_only(char* file_name){
 
     fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
 
-    
+
     snprintf(file->name,50, "%s", file_name);
     file->find = 1;
     fclose(fptr);
@@ -844,72 +899,99 @@ struct HashNode* create_item(char* key, char* value){
     return item;
 }
 
-struct HashTable* create_table(int size){
-    HashTable* table;
 
-    table = hash_init(size);
-    return table;
+static void hash_insert(HashTable* table, char* key, char* value){
+    HashNode* item = create_item(key, value);
+    int idx = hash_function2(key);
+    HashNode* cur = table->items[idx];
+    if (cur == NULL){
+        if (table -> count ==table->size){
+            free_item(item);
+            return ;
+        }
+
+        table -> items[idx] = item;
+        table -> count ++;
+    }
+    else {
+        if (strcmp(cur->key, key) == 0){
+            strcpy(table->items[idx] -> value, value);
+            return ;
+        }
+    }
+}
+
+char* hash_search(HashTable* table, char* key){
+
+    int idx = hash_function2(key);
+    HashNode* item = table -> items[idx];
+    if (item != NULL){
+        if (strcmp(item-> key, key) == 0){
+            return item -> value;
+        } 
+
+    }
+    return NULL;
 }
 
 
 
-
 /*
-struct File* find_file(char* file_name){
-    
-
-    File* file;
-
-    char file_path[1024] = {0};
-    char* hard_path = "./server/book_file/";
-    snprintf(file_path, strlen(hard_path)+1,"%s", hard_path);
-    file = (struct File*)malloc(sizeof(struct File));
-    DIR* os_fd;
-    struct dirent* connector;
-    os_fd = opendir(hard_path);
-
-    if (os_fd==NULL){
-        err("dir does not exists\n");
-        free(file);
-        return NULL;
-    }
+   struct File* find_file(char* file_name){
 
 
-    while ((connector = readdir(os_fd))!= NULL){
-        char* d_name = connector->d_name;
-        if (strlen(d_name) ==strlen(file_name)){
-            int same=1;
-            for (int i =0; i< strlen(d_name); i++){
-                if (d_name[i]!= file_name[i]){
-                    same = 0;
-                    break;
-                }
-            }
-            if (same){
-                // write
-                strcat(file_path, d_name);
-                
-                FILE* fptr;
-                fptr = fopen(file_path, "r");
-                
-                if(fptr==NULL){
-                    printf("\t at find file():: fptr error check file path %s \n", file_path);
-                    break;
-                }
-              
-                fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
+   File* file;
 
-                snprintf(file->name,50, "%s", d_name);
-                file->find = 1;
-                fclose(fptr);
-                return file;
-            }
-        }
-    }
+   char file_path[1024] = {0};
+   char* hard_path = "./server/book_file/";
+   snprintf(file_path, strlen(hard_path)+1,"%s", hard_path);
+   file = (struct File*)malloc(sizeof(struct File));
+   DIR* os_fd;
+   struct dirent* connector;
+   os_fd = opendir(hard_path);
 
-    
-    free(file);
-    return NULL;
+   if (os_fd==NULL){
+   err("dir does not exists\n");
+   free(file);
+   return NULL;
+   }
+
+
+   while ((connector = readdir(os_fd))!= NULL){
+   char* d_name = connector->d_name;
+   if (strlen(d_name) ==strlen(file_name)){
+   int same=1;
+   for (int i =0; i< strlen(d_name); i++){
+   if (d_name[i]!= file_name[i]){
+   same = 0;
+   break;
+   }
+   }
+   if (same){
+// write
+strcat(file_path, d_name);
+
+FILE* fptr;
+fptr = fopen(file_path, "r");
+
+if(fptr==NULL){
+printf("\t at find file():: fptr error check file path %s \n", file_path);
+break;
+}
+
+fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
+
+snprintf(file->name,50, "%s", d_name);
+file->find = 1;
+fclose(fptr);
+return file;
+}
+}
+}
+
+
+free(file);
+return NULL;
 }
 
 
@@ -919,17 +1001,17 @@ struct File* find_file(char* file_name){
 
 struct Cluster* cluster_init(Control* control){
     /*
-    Allocate object to memory
-    First create all the object at the process
-    If all works done, give them to thread
+       Allocate object to memory
+       First create all the object at the process
+       If all works done, give them to thread
 
-    1) create cluster
-    2) create job-queue
-    3) create stream
-    4) create worker -> not a terminate condition
-    
-     
-     */
+       1) create cluster
+       2) create job-queue
+       3) create stream
+       4) create worker -> not a terminate condition
+
+
+*/
 
     Cluster* cluster;
     cluster = (struct Cluster* )malloc(sizeof(struct Cluster ));
@@ -937,7 +1019,7 @@ struct Cluster* cluster_init(Control* control){
         err("cluster_init():: allocatate cluster on memory failed\n");
         return NULL;
     } 
-    
+
     cluster->control = control;
     cluster->num_worker = control->num_worker;
 
@@ -952,25 +1034,25 @@ struct Cluster* cluster_init(Control* control){
 
 
     /*create job queue, terminate condition */
-    if (job_queue_init(&cluster->job_queue) < 0){
+    if (job_queue_init(cluster, &cluster->job_queue) < 0){
         err("could not allocate job queue ");
         free(cluster);
         return NULL;
     }
-     
+
     if (job_scheduler_init(&cluster->scheduler, cluster->num_worker) <0){
         free(cluster);
         return NULL;
     } 
 
-     
+
     cluster->workers = (struct Worker** )malloc(num_worker * sizeof(struct Worker* ));
     if (cluster->workers==NULL){
 
         err("cluster_init():: allocatate worker  on memory failed\n");
         return NULL;
     }
-   
+
 
     /*create stream on cluster*/
     if (async_stream_init(&cluster) < 0 ){
@@ -978,11 +1060,11 @@ struct Cluster* cluster_init(Control* control){
         return NULL;
     }
     /*
-    if (_stream_init(&cluster)<0){
-        err("|_create stream Failed\n");
-        return NULL;
-    }
-    */
+       if (_stream_init(&cluster)<0){
+       err("|_create stream Failed\n");
+       return NULL;
+       }
+       */
     /*create lock*/ 
     pthread_mutex_init(&(cluster->lock), NULL);
     pthread_cond_init(&cluster->idle, NULL);
@@ -991,6 +1073,13 @@ struct Cluster* cluster_init(Control* control){
         worker_init(cluster, &cluster->workers[i], i );
         printf("cluster init : Work thread %d created\n", i);
     }
+
+
+    /* file hash table init */
+ //   cluster->filetable = hash_init(control->hash_size);
+   // if (cluster->filetable ==NULL){
+     //   err("|_ create Hash table Failed \n");
+    //}
 
      
     return cluster;
@@ -1034,7 +1123,12 @@ static int control_init(Control* control){
         else if (strcmp(key, "ececutor.cores.scheduling")){
             control -> scheduling_mode = atoi(value);
         }
-        
+        else if(strcmp(key, "hash_size")){
+            control -> hash_size = atoi(value);
+        }
+        else if(strcmp(key, "file_root")){
+            strcpy(control->file_root, value);
+        } 
     }
     
     return 0;
@@ -1105,9 +1199,12 @@ int main(){
 
     Cluster* cluster = cluster_init(control);
     
-    pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
-    pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduling, cluster);
+    //pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
+    //pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduling, cluster);
 
+
+    pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) listen_handler, cluster);
+    pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) cluster_manager, cluster);
 
     pthread_detach(cluster->main_thread);
     pthread_detach(cluster->schedule_thread);
