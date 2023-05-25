@@ -120,7 +120,9 @@ typedef struct JobScheduler{
     int num_lock;
     int len;
     
-    sem_t mutex;
+
+    pthread_mutex_t rxmutex;
+    int* bit;
 
 } JobScheduler;
 
@@ -147,6 +149,8 @@ typedef struct JobQueue{
     int len;
 
 } JobQueue;
+
+
 
 
 typedef struct Worker{
@@ -267,38 +271,6 @@ static int submit_with_session(Cluster* cluster, void(*function)(void*), void* s
 
 
 /*read& write socket */
-/*
-static int read_clean(int fd, void* buf, size_t len){
-
-    int nread;
-    while((nread = read(fd, buf, len)) > 0) {
-         buf[nread]='\0';    // explicit null termination: updated based on comments
-         printf("%s\n",buf); // print the current receive buffer with a newline
-         fflush(stdout);         // make sure everything makes it to the output
-    }
-    return 0;
-}
-static int read_nowait(int fd, void *buf, size_t len){
-    ssize_t ret;
-     
-    while (len != 0 && (ret = read (fd, buf, len)) != 0) {
-        if (ret == -1) {
-            if (errno == EINTR) continue;
-                perror ("read(): error");
-                    break;                   
-        }
-        len -= ret;
-        buf += ret;            
-    }
-    buf[ret] = '\0';
-
-
-
-    return 0;
-}
-
-
-*/
 
 
 
@@ -355,7 +327,6 @@ static void sem_reset(sem_t* mutex, int value){
 
 /*--------------------------*/
 
-
 static int job_queue_init(Cluster* cluster, JobQueue* job_queue){
    
     cluster -> job_queue_fd = (int* )malloc(2 *sizeof(int));
@@ -377,7 +348,32 @@ static int job_queue_init(Cluster* cluster, JobQueue* job_queue){
     return 0;
 }
 
+static void bit_post(JobScheduler* scheduler, int self){
+    pthread_mutex_lock(&scheduler->rxmutex);
+    scheduler->bit[self] = 1;
+    scheduler->len ++;
 
+    pthread_mutex_unlock(&scheduler->rxmutex);
+}
+
+static void bit_wait(JobScheduler* scheduler, int self){
+    
+    pthread_mutex_lock(&scheduler->rxmutex);
+    scheduler->bit[self] = 0;
+    scheduler -> len --;
+    pthread_mutex_unlock(&scheduler->rxmutex);
+}
+
+
+static int check_idle(JobScheduler* scheduler){
+    int res = -1;
+    pthread_mutex_lock(&scheduler->rxmutex);
+    if (scheduler->len >0){
+        res = 0;
+    }
+    pthread_mutex_unlock(&scheduler->rxmutex);
+    return res;
+}
 
 static void push_back(JobQueue* job_queue, struct Job* new_job){
      
@@ -393,7 +389,7 @@ static void push_back(JobQueue* job_queue, struct Job* new_job){
         job_queue->rear = new_job;
     }
     job_queue -> len ++ ;
-    sem_post(&job_queue->mutex);
+//    sem_post(&job_queue->mutex);
     pthread_mutex_unlock(&job_queue->rxmutex);
 }
 
@@ -412,7 +408,6 @@ static struct Job* pop_front_worker(Worker* self){
 
 
 static struct Job* pop_front(JobQueue* job_queue){
-//    sem_wait(&job_queue->mutex);
     
     pthread_mutex_lock(&job_queue-> rxmutex);
     Job* front = job_queue ->front;
@@ -483,8 +478,11 @@ static void* cluster_manager(Cluster* cluster){
                 new[0] = '\0';
 
                 Job* new_job = pop_front(&cluster -> job_queue);
+
+
+                pthread_mutex_lock(&cluster->scheduler.rxmutex);  
                 for (int j=0; j <cluster->num_worker; j++){
-                    if (cluster->workers[j]->status == 1){
+                    if (cluster->scheduler.bit[j] == 1){
                         if (SERVICE_KEEPALIVE){
                             push_back_worker(cluster->workers[j], new_job);
                             done =0;
@@ -493,12 +491,14 @@ static void* cluster_manager(Cluster* cluster){
                         break;
                     }
                }
+                pthread_mutex_unlock(&cluster->scheduler.rxmutex);
                 if (done==1){
                     Session* session = new_job->info;
 
                     send(session->session_iid, busy_msg, strlen(busy_msg),0); 
                     printf("\nWorker busy now close session[%ld] \n", session->session_iid);
                     close(session->session_iid);
+                    epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, session->session_iid, NULL);
                     free(new_job->info);
                     free(new_job);
 
@@ -532,7 +532,8 @@ static void* worker_handler(Worker* worker){
             printf("read error while handling worker thread \n");
             continue;
         }
-        worker -> status = 0; //busy status 
+        bit_wait(&cluster->scheduler, self);
+
         void(* fn)(void*);
         void* args;
         Job* new_job = pop_front_worker(worker);
@@ -544,7 +545,7 @@ static void* worker_handler(Worker* worker){
             free(new_job->info);
             free(new_job);
         }
-        worker -> status = 1;
+        bit_post(&cluster->scheduler, self);
 
     }
 }
@@ -569,6 +570,12 @@ static void* listen_handler(Cluster* cluster){
         }
         for (int i =0; i<batch; i++){
             if (stream_event_loop[i].data.fd == cluster ->server_fd){
+                /*
+                if (check_idle(&cluster->scheduler) < 0){
+                    printf("Not Allowed accept, no Idle worker \n");
+                    continue;
+                }
+                */
                 int new_client;
                 int session_len;
                 struct sockaddr_in client_addr;
@@ -697,10 +704,16 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     /*
     
      */
-    scheduler->len = 0;
+    scheduler->len = num_lock;
     scheduler->num_lock = num_lock;
+    
+    scheduler -> bit = (int* )malloc(num_lock * sizeof(int ));
+    for (int i=0; i < num_lock; i++){
+        scheduler ->bit[i] = 1;
+    }
+    
+    pthread_mutex_init(&scheduler->rxmutex, NULL);
 
-    sem_init(&scheduler->mutex, 0, num_lock);
     return 0;
 }
 static int update_hash(HashTable* table, char* file_path, char* d_name){
@@ -1032,7 +1045,6 @@ struct Cluster* cluster_init(Control* control){
     }
 
 
-
     /*create job queue, terminate condition */
     if (job_queue_init(cluster, &cluster->job_queue) < 0){
         err("could not allocate job queue ");
@@ -1059,15 +1071,10 @@ struct Cluster* cluster_init(Control* control){
         err("|_ create stream Failed \n");
         return NULL;
     }
-    /*
-       if (_stream_init(&cluster)<0){
-       err("|_create stream Failed\n");
-       return NULL;
-       }
-       */
     /*create lock*/ 
     pthread_mutex_init(&(cluster->lock), NULL);
     pthread_cond_init(&cluster->idle, NULL);
+
     /*create worker thread */
     for (int i=0; i<num_worker; i++){
         worker_init(cluster, &cluster->workers[i], i );
@@ -1180,7 +1187,6 @@ static int free_cluster(Cluster* cluster){
 static int flush_all(Cluster* cluster){
     SERVICE_KEEPALIVE = 0;
     // Job Scheduler
-    sem_destroy(&cluster->scheduler.mutex);    
     free(&cluster->scheduler);
     free_queue(&cluster->job_queue);
     free(cluster->control);

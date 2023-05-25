@@ -14,6 +14,7 @@
 
 #define err(str) fprintf(stderr, str)
 
+
 /*client code*/
 /*----data structure------*/
 
@@ -21,7 +22,11 @@ typedef struct Connect{
     char root[100];
     char inet[20];
     int port;
-
+    int num_context;
+    int session_timeout;
+    int epoll_timeout;
+    int max_epoll_event;
+    
 
 } Connect;
 
@@ -37,7 +42,6 @@ typedef struct Json{
     int session_id;
     int id;
     int len;
-    int req_ts;
     char book[255];
     int cat;
     
@@ -59,7 +63,6 @@ typedef struct BinSemaphore{
 typedef struct Job{
     struct Job* prev;
     void (*function)(void* args);
-    void* args;
     Json* query;
 
 
@@ -130,6 +133,9 @@ typedef struct Driver {
     char history[1024];
     int check;
     JobQueue job_queue;
+
+
+    Connect* connect;
 
 } Driver;
 /*--------------------------*/
@@ -208,6 +214,14 @@ static void wait(BinSemaphore* bsem_p){
     pthread_mutex_unlock(&bsem_p->mutex);
 
 }
+
+
+static int push_back_later(JobQueue* job_queue, Job* new_job){
+      
+
+    return 0;
+}
+    
 
 static void push_back(JobQueue* job_queue, Job* new_job){
     pthread_mutex_lock(&job_queue->rxmutex);
@@ -292,6 +306,36 @@ static struct Job* pop_front(JobQueue* job_queue, BinSemaphore* has_job){
 static struct Job* pop(JobQueue* job_queue_p){
 }
 
+static int set_stream(Context* context, Connect* connection){
+    context -> port = connection->port; 
+    context -> inet[0] = '\0';
+    strcpy(context->inet, connection->inet);
+
+    if ( (context ->fd = socket(AF_INET, SOCK_STREAM,0)) <0){
+        err("set stream :: socket creation error \n");
+        return -1;
+    }
+
+
+    context -> client_addr.sin_family = AF_INET;
+    context -> client_addr.sin_port = htons(context ->port);
+    if (inet_pton(AF_INET, context->inet, &context->client_addr.sin_addr)){
+        err("set stream :: bind failed, invalid address\n");
+        return -1;
+    }
+    
+    if (connect(context->fd, (struct sockaddr* )&(context->client_addr), sizeof(context->client_addr))){
+        err("set stream :: connection failed \n");
+        return -1;
+    }
+
+    
+    return 0;
+    
+
+}
+
+
 
 static int _stream_init(Context*** thread_p){
     Context* context_p = (**thread_p);
@@ -335,6 +379,37 @@ static int _set_session(Context* context_p, Json* query){
     return 0;
 }
 
+
+static void* context_handler(Context* context){
+    char debug_[17] = {0};
+    snprintf(debug_, 17, "context-%d", context->id);
+    Driver* driver = context->driver;
+    while (SERVICE_KEEPALIVE){
+        Job* new_job = pop_front(&driver->job_queue);
+        if (SERVICE_KEEPALIVE){
+                      
+            // stream init here
+            if (set_stream(context, driver->connect) <0){
+
+            }
+            void(* fn)(void*);
+            void* args;
+            if (new_job){
+                fn = new_job->function;
+                _set_session(context, new_job->query);
+                args = new_job -> query;
+                fn(args);
+                free(new_job->query);
+                free(new_job);
+            }
+            close(context->fd);
+
+        }
+    
+    }
+
+}
+
 static void* context_do(Context* context){
     char debug_[17] = {0};
     snprintf(debug_, 17, "context-%d", context->id);
@@ -343,7 +418,7 @@ static void* context_do(Context* context){
     while (SERVICE_KEEPALIVE){
 //        wait(driver->job_queue.has_job);
         Job* new_job = pop_front(&driver->job_queue);
-        if (SERVICE_KEEPALIVE && context->fd>=0){
+        if (SERVICE_KEEPALIVE){
             void(* fn)(void* );
             void* args;
   //          Job* new_job = pop_front(&driver->job_queue, driver->job_queue.has_job);
@@ -357,6 +432,7 @@ static void* context_do(Context* context){
 
             }
         }
+        sleep(2);
     }
 
 
@@ -396,7 +472,7 @@ void request(void* args){
     valread = read(query->session_id, txt_file, 1024);
     
     printf("\t T[%d] recv from server :: %s \n", query->id, txt_file);
-
+    
 }
 
 
@@ -427,14 +503,11 @@ static int add_query(Driver* driver, void (*function_p)(void* ),  void*args_p){
     }
     strcpy( query->book, (char* )args_p);
 
-    query->req_ts = 10; 
     query->len = strlen(query->book);
 
 
     new_job->function =function_p;
     new_job->query = query;
-    Driver* driver_p = driver;
-//    push_back(&driver->job_queue, driver->job_queue.has_job, new_job);
     push_back(&driver->job_queue, new_job);
 
     return 0;
@@ -461,8 +534,7 @@ static int sample(Driver* driver){
 
     while ( fscanf(fptr, "%s", buf)==1 )
         if (i < 10){
-            printf("---debug check buf %s\n", buf);
-            done =  add_query(driver, request, (void* )(char* )buf);
+        done =  add_query(driver, request, (void* )(char* )buf);
         i+=1;
         }
         
@@ -491,23 +563,23 @@ static int context_init(Driver* driver, struct Context** thread_p, int id){
     }
     (*thread_p)->driver = driver;
     (*thread_p)->id = id;
-
+    /*
     if (_stream_init(&thread_p) <0){
         err("|_stream_init(): error\n");
         return -1;
     }
-    
+    */
     printf("create context on thread\n");
-    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
+    //pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_do, (*thread_p));
+    pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) context_handler, (*thread_p));
     pthread_detach((*thread_p)->pthread);
     return 0;
 
 }
 
 
-struct Driver* driver_init(int num_context){
+struct Driver* driver_init(int num_context, Connect* connection ){
     Driver* driver;
-
     SERVICE_KEEPALIVE =1;
     driver  = (struct Driver* )malloc(sizeof(struct Driver));
     if (driver == NULL){
@@ -515,6 +587,7 @@ struct Driver* driver_init(int num_context){
         return NULL;
     }
     
+    driver -> connect = connection;
     if (job_queue_init(&driver->job_queue)<0){
         err("driver_init(): could not allocate moemory for job queue");
             
@@ -539,11 +612,52 @@ struct Driver* driver_init(int num_context){
     return driver;
 }
 
+
+static int connect_init(Connect* connect){
+    /*
+     
+     */
+    FILE* fptr;
+    char* root = "./client/secret.txt";
+    
+    fptr = fopen(root, "a+");
+    char key[20];
+    char value[20];
+    while ( fscanf(fptr, "%s\t%s\n", key, value) != EOF ){
+        if (strcmp(key, "port")==0){
+            connect->port = atoi(value);
+        }
+        else if (strcmp(key, "inet")==0){
+            strcpy(connect->inet, value);
+        }
+        else if (strcmp(key, "num_context")==0){
+            connect->num_context = atoi(value);
+        }
+        else if (strcmp(key, "session_timeout")==0){
+            connect->session_timeout = atoi(value);
+        }
+        else if (strcmp(key, "epoll_timeout")==0){
+            connect->epoll_timeout = atoi(value);
+        }
+        else if (strcmp(key, "max_epoll_event")==0){
+            connect -> max_epoll_event = atoi(value);
+        }
+        else if (strcmp(key, "root")==0){
+            strcpy(connect->root, value);
+        }
+    }
+    fclose(fptr);
+    return 0;
+}
+
 int main(){
-    Driver* driver  = driver_init(2);
+
+    Connect* connection = (struct Connect* )malloc(sizeof(struct Connect));
+    connect_init(connection);
+    Driver* driver  = driver_init(connection->num_context, connection);
     printf("--------------runing---------------- \n");
-    /*test code on sample */
     sample(driver);
+
     while (SERVICE_KEEPALIVE){
         continue;
     }
