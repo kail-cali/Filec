@@ -640,6 +640,7 @@ static int connect_init(Connect* connect){
      */
     FILE* fptr;
     char* root = "./client/secret.txt";
+//    char* root = "./client/secrtet.private.txt";
     
     fptr = fopen(root, "a+");
     char key[20];
@@ -680,7 +681,7 @@ int main(){
     sample(driver);
 
     while (SERVICE_KEEPALIVE){
-        sleep(20);
+        sleep(30);
         SERVICE_KEEPALIVE = 0;
     }
     printf("-------------client end-------------\n");

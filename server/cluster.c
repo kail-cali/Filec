@@ -560,8 +560,6 @@ static void* worker_handler(Worker* worker){
             fn = new_job->function;
             args = new_job->info;
             
-            printf("===debug==== sleep 5");
-            sleep(5);
 
             if (fn ==NULL){
             }
@@ -583,7 +581,6 @@ static void* worker_handler(Worker* worker){
 
 static int add_event(int epoll_fd, int client_fd, int args){
     /* set as non _blocking */
-    printf("====debug add event \n");
     
     struct epoll_event ev;
     ev.events = args;
@@ -598,7 +595,6 @@ static int add_event(int epoll_fd, int client_fd, int args){
 
 static int add_event_non_block(int epoll_fd, int client_fd, int args){
     
-    printf("====debug add event \n");
 
     int flags =fcntl(client_fd, F_GETFL, 0);
     if (flags <0){
@@ -653,7 +649,6 @@ static void* listen_handler(Cluster* cluster){
                     continue;
                 }
                 */
-                printf("\t ==== debug check new accept \n");
                 int new_client;
                 int session_len;
                 struct sockaddr_in client_addr;
@@ -676,7 +671,6 @@ static void* listen_handler(Cluster* cluster){
             else {
                 int str_len;
                 int new_client = stream_event_loop[i].data.fd;
-                printf("\t== debug new_client fd check[%d] \n", new_client);
                 Session* session;
                 session = create_session(new_client);
                 if (session ==NULL){
@@ -1195,9 +1189,8 @@ static int control_init(Control* control){
      I/O from server/control.txt
      */
     FILE* fptr;
-    // hard coding --> add  argparse later version
-    // char* root = "./server/control.txt";
-    char* root = "./server/control.private.txt";
+    char* root = "./server/control.txt";
+//    char* root = "./server/control.private.txt";
     
     fptr = fopen(root, "a+");
     char key[20];
