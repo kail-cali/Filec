@@ -1,7 +1,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <semaphore.h>
-
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 
 #define err(str) fprintf(stderr, str)
 
@@ -319,12 +320,26 @@ static int set_stream(Context* context, Connect* connection){
 
     context -> client_addr.sin_family = AF_INET;
     context -> client_addr.sin_port = htons(context ->port);
+    
     if (inet_pton(AF_INET, context->inet, &context->client_addr.sin_addr)){
         err("set stream :: bind failed, invalid address\n");
         return -1;
     }
     
-    if (connect(context->fd, (struct sockaddr* )&(context->client_addr), sizeof(context->client_addr))){
+    /*
+    long args;
+    if ((args = fcntl(context->fd, F_GETFL)) < 0){
+        err("set stream :: set socket flag error\n");
+        return -1;
+    }
+
+    args |= O_NONBLOCK;
+    if (fcntl(context->fd, F_SETFL, args) < 0) {
+        err("set stream :: set socket flag error\n");
+        return -1;
+    }
+*/
+    if (connect(context->fd, (struct sockaddr* )&(context->client_addr), sizeof(context->client_addr))<0){
         err("set stream :: connection failed \n");
         return -1;
     }
@@ -385,12 +400,15 @@ static void* context_handler(Context* context){
     snprintf(debug_, 17, "context-%d", context->id);
     Driver* driver = context->driver;
     while (SERVICE_KEEPALIVE){
+
         Job* new_job = pop_front(&driver->job_queue);
+        printf("=====================\n at handler after new job \n==========================\n");
         if (SERVICE_KEEPALIVE){
-                      
+                               
             // stream init here
             if (set_stream(context, driver->connect) <0){
-
+                err("at context handler, set stream error\n");
+                continue;
             }
             void(* fn)(void*);
             void* args;
@@ -401,11 +419,11 @@ static void* context_handler(Context* context){
                 fn(args);
                 free(new_job->query);
                 free(new_job);
+                close(context->fd);
             }
-            close(context->fd);
 
         }
-    
+         
     }
 
 }
@@ -469,8 +487,8 @@ void request(void* args){
     printf("Thread #%d (%u) working on  book name (%s)\n", query->id,(int)pthread_self(), query->book );
     send(query->session_id, query->book, query->len, 0);
     printf("\t T[%d] send done \n", query->id);
-    valread = read(query->session_id, txt_file, 1024);
-    
+    valread = read(query->session_id, txt_file, sizeof(txt_file)-1);
+    txt_file[valread] = '\0'; 
     printf("\t T[%d] recv from server :: %s \n", query->id, txt_file);
     
 }
@@ -529,9 +547,8 @@ static int sample(Driver* driver){
     int done;   
     char buf[50];
 
-
     fptr = fopen("./client/search_history.txt", "a+");
-
+    
     while ( fscanf(fptr, "%s", buf)==1 )
         if (i < 10){
         done =  add_query(driver, request, (void* )(char* )buf);
@@ -540,6 +557,7 @@ static int sample(Driver* driver){
         
     
     fclose(fptr);
+    
     return 0;
 }
 

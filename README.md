@@ -1,5 +1,7 @@
-# Filec
+# Multiplex-Full-duplex Server on Spark Implementation
+
 `File Transfer Server based on spark architecture`
+`verseion <v2.2.0>`
 
 ## Feature
 - MulitPlexing-Duplexing Server with epoll and n-full-duplex pipe
@@ -14,10 +16,9 @@
  
 
 ## Acrciteture
-`There is 3 Sub-Thread for each middle-ware server`
-- pair-wise Pipe connection with thread-pool (with no lock wait)
-- Listen Server
-- Job Scheduler(Just FIFO)
+- Listen Server with Handler
+- Cluster Manager
+⋅ - Job Scheduling(FIFO)
 
 ## How To Run
 

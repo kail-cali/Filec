@@ -169,7 +169,6 @@ typedef struct Worker{
      */
     pthread_t pthread;
     int id; // logical index for worker
-    int status; // check idle status, 0 is Working , 1 is Idle
     Job* job; // <v.0.2>private container for new job 
 
 
@@ -356,7 +355,7 @@ static void bit_post(JobScheduler* scheduler, int self){
     pthread_mutex_unlock(&scheduler->rxmutex);
 }
 
-static void bit_wait(JobScheduler* scheduler, int self){
+static void bit_work(JobScheduler* scheduler, int self){
     
     pthread_mutex_lock(&scheduler->rxmutex);
     scheduler->bit[self] = 0;
@@ -396,7 +395,7 @@ static void push_back(JobQueue* job_queue, struct Job* new_job){
 
 
 static void push_back_worker(Worker* worker , struct Job* new_job){
-    
+
     worker->job = new_job;
 
 }
@@ -457,13 +456,41 @@ static int pipe_init(Cluster* cluster, int num_worker){
     return 0; 
 }    
 
+static int scheduling_handler(Cluster* cluster, Job* new_job){
+    if (new_job ==NULL){
+        return -1;
+    }
+    char notify[2] ={'1'};
+
+    pthread_mutex_lock(&cluster ->scheduler.rxmutex);
+    if (cluster->scheduler.len <=0){
+        pthread_mutex_unlock(&cluster ->scheduler.rxmutex);
+        err("Job Scheduler error check Job queue and push & pop methods \n") ;
+        return -1;
+    }
+    for (int i=0; i< cluster->num_worker; i++){
+       if (cluster -> scheduler.bit[i] ==1 && SERVICE_KEEPALIVE){
+            cluster -> scheduler.bit[i] = 0;
+            cluster -> scheduler.len --;
+            pthread_mutex_unlock(&cluster -> scheduler.rxmutex);
+            push_back_worker(cluster->workers[i], new_job);
+            write(cluster -> worker_pipe[i][1], notify, sizeof(notify));
+            return 0;
+        } 
+        
+    }
+
+    return 1;
+}
+
+
 static void* cluster_manager(Cluster* cluster){
     printf("===  Cluster Manager Starot on Thread === \n");
     int batch;
-    char notify[2];
     char new[2];
-    int done= 1;
     char busy_msg[100] = {0};
+    int schedule_status;
+
     snprintf(busy_msg, 100, "<nsf> Server Busy Now, redirect later");
     while (SERVICE_KEEPALIVE){
         batch = epoll_wait(cluster->pipe_epoll_fd, cluster -> pipe_events, 1024, cluster->control->session_timeout);     
@@ -473,35 +500,24 @@ static void* cluster_manager(Cluster* cluster){
         }
         for (int i =0; i <batch; i++){
             if (cluster->pipe_events[i].data.fd == cluster->job_queue_fd[0]){
-                done = 1;
                 read(cluster->job_queue_fd[0], new, sizeof(new));
                 new[0] = '\0';
 
                 Job* new_job = pop_front(&cluster -> job_queue);
-
-
-                pthread_mutex_lock(&cluster->scheduler.rxmutex);  
-                for (int j=0; j <cluster->num_worker; j++){
-                    if (cluster->scheduler.bit[j] == 1){
-                        if (SERVICE_KEEPALIVE){
-                            push_back_worker(cluster->workers[j], new_job);
-                            done =0;
-                            write(cluster-> worker_pipe[j][1], notify, sizeof(notify));
-                        }             
-                        break;
-                    }
-               }
-                pthread_mutex_unlock(&cluster->scheduler.rxmutex);
-                if (done==1){
+                schedule_status = scheduling_handler(cluster, new_job);
+                if (schedule_status==0){
+                   // printf("work properly\n") ;
+                }
+                else if (schedule_status==1){
                     Session* session = new_job->info;
 
                     send(session->session_iid, busy_msg, strlen(busy_msg),0); 
                     printf("\nWorker busy now close session[%ld] \n", session->session_iid);
-                    close(session->session_iid);
+                    
                     epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, session->session_iid, NULL);
-                    free(new_job->info);
-                    free(new_job);
-
+                }
+                else {
+                   // err("scheduling error\n");
                 }
                 
 
@@ -517,7 +533,10 @@ static void* file_event_handler(Worker* worker){
     
 }
 
-
+int is_valid_fd(int fd)
+{
+    return fcntl(fd, F_GETFL) != -1 || errno != EBADF;
+}
 
 static void* worker_handler(Worker* worker){
     char worker_name[16] = {0};
@@ -532,19 +551,27 @@ static void* worker_handler(Worker* worker){
             printf("read error while handling worker thread \n");
             continue;
         }
-        bit_wait(&cluster->scheduler, self);
+        // bit_work(&cluster->scheduler, self);
 
         void(* fn)(void*);
         void* args;
         Job* new_job = pop_front_worker(worker);
-        if (new_job){
+        if (new_job && is_valid_fd(new_job->info->session_iid)){
             new_job->info->worker_id = self;
             fn = new_job->function;
             args = new_job->info;
+
+            if (fn ==NULL){
+            }
+            if (args ==NULL){
+
+            }
             fn(args);
+
             free(new_job->info);
             free(new_job);
         }
+
         bit_post(&cluster->scheduler, self);
 
     }
@@ -579,11 +606,11 @@ static void* listen_handler(Cluster* cluster){
                 int new_client;
                 int session_len;
                 struct sockaddr_in client_addr;
-
                 session_len = sizeof(client_addr);
                 new_client = accept(cluster -> server_fd, (struct sockaddr* )&client_addr, (socklen_t* )&session_len);
 
                 if(new_client <0){
+                    err("client accept error \n");
                     continue;
                 }
                 struct epoll_event event;
@@ -599,17 +626,27 @@ static void* listen_handler(Cluster* cluster){
                 int new_client = stream_event_loop[i].data.fd;
                 Session* session;
                 session = create_session(new_client);
+                if (session ==NULL){
+                    printf("could not allocate memory session redi\n");
+                    session = create_session(new_client);
+                }
                 str_len = read(session -> session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
-                session -> read_buffer[str_len] = '\0';
-
-
-                if (str_len==0){
-                    printf("close session timeout[%d] \n", new_client);
-                    close(new_client);
+                if (str_len <0){
+                    printf("close session on shutdown[%d]\n", new_client);
                     epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
                 }
+                
+                else if (str_len==0){
+                    printf("close session timeout[%d] \n", new_client);
+                    epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
+                    
+                }
                 else {
-                    submit_with_session(cluster,task_fn, (void*)(uintptr_t)session);
+                    session -> read_buffer[str_len] = '\0';
+                    if (submit_with_session(cluster,task_fn, (void*)(uintptr_t)session) <0){
+                        err(" could not submit session to job queue \n");
+                        continue;
+                    }
                     write(cluster-> job_queue_fd[1], notify, sizeof(notify));
                 }
             }
@@ -642,7 +679,7 @@ static int submit_with_session(Cluster* cluster, void(*function)(void*), void* s
 
 
 struct Session* create_session(int new_session_id ){
-    
+    printf("==== <debug> check create session =====\n"); 
     Session* session;
     session = (struct Session* )malloc(sizeof(struct Session));
     if (session ==NULL){
@@ -672,7 +709,7 @@ void task_fn(void* args){
      - send file to client 
 
      */
-
+      
     Session* session = (Session* )args;
     File* file;
     printf("Thread #%d (%u)  Working on session[%ld] \n", session->worker_id , (int)pthread_self(), session->session_iid);
@@ -696,7 +733,7 @@ void task_fn(void* args){
         
      }
 
-     session->read_buffer[0]= '\0';
+     //session->read_buffer[0]= '\0';
 }
 
 
@@ -778,7 +815,6 @@ static int worker_init(Cluster* cluster, struct Worker** thread, int id){
 
     (*thread) -> cluster = cluster;
     (*thread) -> id = id;
-    (*thread) -> status = 1;
 
     pthread_create(&(*thread)->pthread, NULL, (void * (*)(void* )) worker_handler, (*thread));
     pthread_detach((*thread)->pthread);
