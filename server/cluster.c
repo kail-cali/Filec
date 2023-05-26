@@ -551,7 +551,6 @@ static void* worker_handler(Worker* worker){
             printf("read error while handling worker thread \n");
             continue;
         }
-        // bit_work(&cluster->scheduler, self);
 
         void(* fn)(void*);
         void* args;
@@ -560,6 +559,9 @@ static void* worker_handler(Worker* worker){
             new_job->info->worker_id = self;
             fn = new_job->function;
             args = new_job->info;
+            
+            printf("===debug==== sleep 5");
+            sleep(5);
 
             if (fn ==NULL){
             }
@@ -579,6 +581,54 @@ static void* worker_handler(Worker* worker){
 
 
 
+static int add_event(int epoll_fd, int client_fd, int args){
+    /* set as non _blocking */
+    printf("====debug add event \n");
+    
+    struct epoll_event ev;
+    ev.events = args;
+    ev.data.fd = client_fd;
+
+
+    if( epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) <0 ){
+        return -1;
+    }
+    return 0;
+}
+
+static int add_event_non_block(int epoll_fd, int client_fd, int args){
+    
+    printf("====debug add event \n");
+
+    int flags =fcntl(client_fd, F_GETFL, 0);
+    if (flags <0){
+        return -1;
+    }
+
+    if (fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) <0){
+        return -1;
+    }
+    
+    struct epoll_event ev;
+    ev.events = args;
+    ev.data.fd = client_fd;
+
+    if( epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) <0 ){
+        return -1;
+    }
+
+    return 0;
+}
+
+
+static int del_event(int epoll_fd, int client_fd, int args){
+    struct epoll_event ev;
+    ev.events = args;
+    ev.data.fd = client_fd;
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+
+    return 0;
+}
 
 
 static void* listen_handler(Cluster* cluster){
@@ -603,6 +653,7 @@ static void* listen_handler(Cluster* cluster){
                     continue;
                 }
                 */
+                printf("\t ==== debug check new accept \n");
                 int new_client;
                 int session_len;
                 struct sockaddr_in client_addr;
@@ -613,41 +664,51 @@ static void* listen_handler(Cluster* cluster){
                     err("client accept error \n");
                     continue;
                 }
-                struct epoll_event event;
-                event.events = EPOLLIN | EPOLLET;
-                event.data.fd = new_client;
-                if (epoll_ctl(cluster->stream_event_fd, EPOLL_CTL_ADD, new_client, &event)<0){
-                    err("epoll ctl error \n");
-                    continue;
+                /*
+                if (add_event(cluster->stream_event_fd, new_client, EPOLLIN | EPOLLET) <0){
+                    err("at listen handler :: add event failed\n");
+                }
+                */
+                if (add_event_non_block(cluster->stream_event_fd, new_client, EPOLLIN | EPOLLET) <0){
+                    err("at listen handler :: add event failed\n");
                 }
             }
             else {
                 int str_len;
                 int new_client = stream_event_loop[i].data.fd;
+                printf("\t== debug new_client fd check[%d] \n", new_client);
                 Session* session;
                 session = create_session(new_client);
                 if (session ==NULL){
-                    printf("could not allocate memory session redi\n");
-                    session = create_session(new_client);
+                    //session = create_session(new_client);
+                    printf(" Session could not allocat error ");
+
                 }
                 str_len = read(session -> session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
                 if (str_len <0){
                     printf("close session on shutdown[%d]\n", new_client);
-                    epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
+                    del_event(cluster->stream_event_fd, new_client, 0);
+                    //epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
+                    close(new_client);
                 }
                 
                 else if (str_len==0){
                     printf("close session timeout[%d] \n", new_client);
-                    epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
+                    del_event(cluster->stream_event_fd, new_client, 0);
+                    //epoll_ctl(cluster -> stream_event_fd, EPOLL_CTL_DEL, new_client, NULL);
+                    close(new_client);
                     
                 }
                 else {
                     session -> read_buffer[str_len] = '\0';
                     if (submit_with_session(cluster,task_fn, (void*)(uintptr_t)session) <0){
                         err(" could not submit session to job queue \n");
-                        continue;
+
                     }
-                    write(cluster-> job_queue_fd[1], notify, sizeof(notify));
+                    else{
+
+                        write(cluster-> job_queue_fd[1], notify, sizeof(notify));
+                    }
                 }
             }
         
@@ -679,7 +740,6 @@ static int submit_with_session(Cluster* cluster, void(*function)(void*), void* s
 
 
 struct Session* create_session(int new_session_id ){
-    printf("==== <debug> check create session =====\n"); 
     Session* session;
     session = (struct Session* )malloc(sizeof(struct Session));
     if (session ==NULL){

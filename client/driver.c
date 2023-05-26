@@ -402,7 +402,6 @@ static void* context_handler(Context* context){
     while (SERVICE_KEEPALIVE){
 
         Job* new_job = pop_front(&driver->job_queue);
-        printf("=====================\n at handler after new job \n==========================\n");
         if (SERVICE_KEEPALIVE){
                                
             // stream init here
@@ -450,7 +449,6 @@ static void* context_do(Context* context){
 
             }
         }
-        sleep(2);
     }
 
 
@@ -488,6 +486,14 @@ void request(void* args){
     send(query->session_id, query->book, query->len, 0);
     printf("\t T[%d] send done \n", query->id);
     valread = read(query->session_id, txt_file, sizeof(txt_file)-1);
+    if (valread <0){
+        err("recv error while request do \n");
+        return;
+    }
+
+    
+    
+
     txt_file[valread] = '\0'; 
     printf("\t T[%d] recv from server :: %s \n", query->id, txt_file);
     
@@ -542,20 +548,17 @@ static int sample(Driver* driver){
 
      */
     printf("TEST:: Sample query\n ");
-    int i ; 
+    int i =0; 
     FILE *fptr;
-    int done;   
     char buf[50];
-
+    int done;
     fptr = fopen("./client/search_history.txt", "a+");
     
-    while ( fscanf(fptr, "%s", buf)==1 )
-        if (i < 10){
-        done =  add_query(driver, request, (void* )(char* )buf);
+    while ( fscanf(fptr, "%s", buf)==1 ){
+        done = add_query(driver, request, (void* )(char *)buf);
         i+=1;
-        }
-        
-    
+    }
+    printf("total sample query number (%d) \n", i);
     fclose(fptr);
     
     return 0;
@@ -677,7 +680,8 @@ int main(){
     sample(driver);
 
     while (SERVICE_KEEPALIVE){
-        continue;
+        sleep(20);
+        SERVICE_KEEPALIVE = 0;
     }
     printf("-------------client end-------------\n");
     return 0;
