@@ -29,6 +29,14 @@ static volatile int SERVICE_KEEPALIVE;  // Service status used for run forever o
 const int CAPACITY = 100;
 /*----------class-----------*/
 
+
+struct Cluster;
+
+struct Worker;
+
+
+/*--------------------------*/
+
 typedef struct Control{
     int service_status;    
 
@@ -93,6 +101,7 @@ typedef struct Session{
 
     char read_buffer[1024];
     int varlead_status;
+    struct Cluster* cluster;
     
 } Session;
 
@@ -316,15 +325,118 @@ static unsigned int hash_function2(char* key)
 	return h;
 }
 
-
-/*--------------------------*/
-
-
-static void sem_reset(sem_t* mutex, int value){
-    sem_init(mutex, 0, value);
+HashTable* hash_init( int size){
+    HashTable* table = (HashTable* )malloc(sizeof(HashTable));
+    table->size = size;
+    table->count = 0;
+    table->items = (HashNode**)calloc(table->size, sizeof(HashNode* ));
+    for (int i=0; i < table->size; i++){
+        table -> items[i] = NULL;
+    }
+    return table;
 }
 
-/*--------------------------*/
+struct HashNode* create_item(char* key, char* value){
+    HashNode* item = (HashNode* )malloc(sizeof(HashNode));
+
+    item ->key = (char* )malloc(strlen(key)+1);
+    item -> value = (char* )malloc(strlen(value)+1);
+
+    strcpy(item->key, key);
+    strcpy(item->value, value);
+
+    return item;
+}
+
+
+
+static void update_hash(HashTable* table, char* key, char* value){
+    HashNode* item = create_item(key, value);
+    int idx = hash_function2(key);
+    HashNode* cur = table->items[idx];
+    if (cur == NULL){
+        if (table -> count ==table->size){
+            free_item(item);
+            return ;
+        }
+
+        table -> items[idx] = item;
+        table -> count ++;
+    }
+    else {
+        if (strcmp(cur->key, key) == 0){
+            strcpy(table->items[idx] -> value, value);
+            return ;
+        }
+    }
+}
+
+char* search_hash(HashTable* table, char* key){
+
+    int idx = hash_function2(key);
+    HashNode* item = table -> items[idx];
+    if (item != NULL){
+        if (strcmp(item-> key, key) == 0){
+            return item -> value;
+        } 
+
+    }
+    return NULL;
+}
+
+static int search_file_io(char* file_name, Cluster* cluster){
+    char file_path[1024] = {0};
+    char value[2048] = {0};
+    strcpy(file_path, cluster->control ->file_root);
+    strcat(file_path, file_name);
+    
+    FILE* fptr;
+    fptr = fopen(file_path, "r");
+
+    if (fptr ==NULL){
+        return -1;
+    }
+
+    fread(value, 1, sizeof(value), fptr);
+
+    update_hash(cluster->filetable, file_name, value);
+
+    return 0;
+
+}
+
+struct File* find_file_only(char* file_name){
+    File* file;
+    char file_path[2048] = {0};
+
+    char* path = "./server/book_file/";
+    snprintf(file_path, strlen(path)+1, "%s", path);
+    strcat(file_path, file_name);
+
+    FILE* fptr;
+    fptr = fopen(file_path, "r");
+    if (fptr==NULL){
+        return NULL;
+    } 
+    file = (struct File* )malloc(sizeof(struct File));
+
+    fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
+
+
+    snprintf(file->name,50, "%s", file_name);
+    file->find = 1;
+    fclose(fptr);
+    return file;
+}
+
+
+
+
+/*-------------------------------*/
+
+
+
+/*------------Job queue------------*/
 
 static int job_queue_init(Cluster* cluster, JobQueue* job_queue){
    
@@ -529,9 +641,9 @@ static void* cluster_manager(Cluster* cluster){
 
 
 
-static void* file_event_handler(Worker* worker){
-    
-}
+
+
+
 
 int is_valid_fd(int fd)
 {
@@ -678,6 +790,8 @@ static void* listen_handler(Cluster* cluster){
                     printf(" Session could not allocat error ");
 
                 }
+                session->cluster = cluster;
+
                 str_len = read(session -> session_iid, &session->read_buffer, sizeof(session->read_buffer)-1);
                 if (str_len <0){
                     printf("close session on shutdown[%d]\n", new_client);
@@ -744,16 +858,11 @@ struct Session* create_session(int new_session_id ){
 
     session->session_iid = (uintptr_t)new_session_id;
     session->read_buffer[0] = '\0';
+    
     return session;
 }
 
 
-void task_find_file(void* args){
-    Session* session = (Session* ) args;
-    File* file;
-
-    
-}
 
 void task_fn(void* args){
     /*
@@ -791,6 +900,19 @@ void task_fn(void* args){
 }
 
 
+void* file_event_handler(void* args){
+    Session* session = (Session* )args;
+    
+    printf("Thread #%d (%u)  Working on session[%ld] \n", session->worker_id , (int)pthread_self(), session->session_iid);
+    
+    printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
+     
+
+    
+}
+
+
+
 static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
     /*
     
@@ -807,56 +929,10 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
 
     return 0;
 }
-static int update_hash(HashTable* table, char* file_path, char* d_name){
 
 
-    return 0;
-}
-static int file_hashing_init(HashTable* table, Control* control){
-    char file_path[1024] = {0};
-    DIR* file_read_fd;
-    FILE* fptr;
-    char buf[1024];
 
-    struct dirent* connector;
-    file_read_fd = opendir(control->file_root);
-    if (file_read_fd==NULL){
-        err("file root does not exists \n");
-        return -1;
-    }
 
-    while ((connector = readdir(file_read_fd)) != NULL){
-        file_path[0] = '\0'; 
-        snprintf(file_path, strlen(control->file_root)+1, "%s", control->file_root);
-        snprintf(file_path, strlen(connector->d_name)+1, "%s", connector->d_name);
-        fptr = fopen(file_path, "r");
-        if (fptr ==NULL){
-            err("file open error \n");
-            continue;
-        }
-        buf[0] = '\0';
-        fread(buf, 1, sizeof(buf), fptr);
-        fclose(fptr);
-
-        
-    }
-      
-    
-    return 0;
-}
-
-HashTable* hash_init( int size){
-    HashTable* table = (HashTable* )malloc(sizeof(HashTable));
-    table->size = size;
-    table->count = 0;
-    table->items = (HashNode**)calloc(table->size, sizeof(HashNode* ));
-    for (int i=0; i < table->size; i++){
-        table -> items[i] = NULL;
-    }
-
-    return table;
-
-}
 
 
 
@@ -935,7 +1011,7 @@ static int async_stream_init(Cluster** cluster_p){
     } 
 
     // int flags = fcntl(server_fd, F_GETFL);
-    // if (fcntl(server_fd, F_SETFL, flags)<0){
+    // if (fcntl(server_fd, F_SETFL, flags | O_NONBLOCK)<0){
     //    return -1;
     // }
 
@@ -965,77 +1041,9 @@ static int async_stream_init(Cluster** cluster_p){
 }
 
 
-struct File* find_file_only(char* file_name){
-    File* file;
-    char file_path[2048] = {0};
-
-    char* path = "./server/book_file/";
-    snprintf(file_path, strlen(path)+1, "%s", path);
-    strcat(file_path, file_name);
-
-    FILE* fptr;
-    fptr = fopen(file_path, "r");
-    if (fptr==NULL){
-        return NULL;
-    } 
-    file = (struct File* )malloc(sizeof(struct File));
-
-    fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
 
 
-    snprintf(file->name,50, "%s", file_name);
-    file->find = 1;
-    fclose(fptr);
-    return file;
-}
 
-
-struct HashNode* create_item(char* key, char* value){
-    HashNode* item = (HashNode* )malloc(sizeof(HashNode));
-
-    item ->key = (char* )malloc(strlen(key)+1);
-    item -> value = (char* )malloc(strlen(value)+1);
-
-    strcpy(item->key, key);
-    strcpy(item->value, value);
-
-    return item;
-}
-
-
-static void hash_insert(HashTable* table, char* key, char* value){
-    HashNode* item = create_item(key, value);
-    int idx = hash_function2(key);
-    HashNode* cur = table->items[idx];
-    if (cur == NULL){
-        if (table -> count ==table->size){
-            free_item(item);
-            return ;
-        }
-
-        table -> items[idx] = item;
-        table -> count ++;
-    }
-    else {
-        if (strcmp(cur->key, key) == 0){
-            strcpy(table->items[idx] -> value, value);
-            return ;
-        }
-    }
-}
-
-char* hash_search(HashTable* table, char* key){
-
-    int idx = hash_function2(key);
-    HashNode* item = table -> items[idx];
-    if (item != NULL){
-        if (strcmp(item-> key, key) == 0){
-            return item -> value;
-        } 
-
-    }
-    return NULL;
-}
 
 
 
@@ -1173,10 +1181,10 @@ struct Cluster* cluster_init(Control* control){
 
 
     /* file hash table init */
- //   cluster->filetable = hash_init(control->hash_size);
-   // if (cluster->filetable ==NULL){
-     //   err("|_ create Hash table Failed \n");
-    //}
+    cluster->filetable = hash_init(control->hash_size);
+    if (cluster->filetable ==NULL){
+       err("|_ create Hash table Failed \n");
+    }
 
      
     return cluster;
@@ -1189,8 +1197,8 @@ static int control_init(Control* control){
      I/O from server/control.txt
      */
     FILE* fptr;
-    char* root = "./server/control.txt";
-//    char* root = "./server/control.private.txt";
+    //char* root = "./server/control.txt";
+    char* root = "./server/control.private.txt";
     
     fptr = fopen(root, "a+");
     char key[20];
@@ -1293,10 +1301,6 @@ int main(){
     SERVICE_KEEPALIVE =1;
 
     Cluster* cluster = cluster_init(control);
-    
-    //pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) cluster_do, cluster);
-    //pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) scheduling, cluster);
-
 
     pthread_create(&(cluster->main_thread), NULL, (void * (*)(void* )) listen_handler, cluster);
     pthread_create(&(cluster->schedule_thread), NULL, (void * (*)(void* )) cluster_manager, cluster);
