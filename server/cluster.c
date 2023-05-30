@@ -77,6 +77,8 @@ typedef struct HashTable{
     int count;
 } HashTable;
 
+
+
 typedef struct File{
     /*
     Object for transfering query-result to client
@@ -88,6 +90,8 @@ typedef struct File{
     int size;
     int find;
 } File;
+
+
 
 typedef struct Session{
     /*
@@ -275,6 +279,14 @@ struct File* find_file_only(char* file_name);
 
 struct Session* create_session(int  new_session_id );
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p);
+
+
+void file_event_handler(void* args);
+void pre_processing_handler(void* args);
+
+void word_count_handler(void* args);
+
+
 /*--------------------------*/
 
 
@@ -369,6 +381,7 @@ static void update_hash(HashTable* table, char* key, char* value){
             return ;
         }
     }
+
 }
 
 char* search_hash(HashTable* table, char* key){
@@ -384,7 +397,7 @@ char* search_hash(HashTable* table, char* key){
     return NULL;
 }
 
-static int search_file_io(char* file_name, Cluster* cluster){
+static int file_io(Cluster* cluster, char* file_name){
     char file_path[1024] = {0};
     char value[2048] = {0};
     strcpy(file_path, cluster->control ->file_root);
@@ -404,6 +417,9 @@ static int search_file_io(char* file_name, Cluster* cluster){
     return 0;
 
 }
+
+
+
 
 struct File* find_file_only(char* file_name){
     File* file;
@@ -809,14 +825,38 @@ static void* listen_handler(Cluster* cluster){
                 }
                 else {
                     session -> read_buffer[str_len] = '\0';
-                    if (submit_with_session(cluster,task_fn, (void*)(uintptr_t)session) <0){
-                        err(" could not submit session to job queue \n");
 
+                    if (strncmp(session->read_buffer, "<fnd>", 5)==0){
+                        printf("API:: find \n");
+                        submit_with_session(cluster, file_event_handler, (void*)(uintptr_t)session);
+                        write(cluster -> job_queue_fd[1], notify, sizeof(notify));
                     }
+
+                    else if (strncmp(session->read_buffer, "<pps>", 5)==0){
+                        printf("API:: pre-processing\n");
+                        submit_with_session(cluster, pre_processing_handler, (void*)(uintptr_t)session);
+                        write(cluster -> job_queue_fd[1], notify, sizeof(notify));
+                    }
+
+
+                    else if (strncmp(session->read_buffer, "<wdc>",5)==0){
+                        printf("API:: word-counter\n");
+                        submit_with_session(cluster, pre_processing_handler, (void*)(uintptr_t)session);
+                        write(cluster -> job_queue_fd[1], notify, sizeof(notify));
+                    }
+
                     else{
+                        printf("API:: default -> find file \n");
 
-                        write(cluster-> job_queue_fd[1], notify, sizeof(notify));
+                        if (submit_with_session(cluster,task_fn, (void*)(uintptr_t)session) <0){
+                            err(" could not submit session to job queue \n");
+                        }
+                        else{
+                            write(cluster-> job_queue_fd[1], notify, sizeof(notify));
+                        }
                     }
+
+                    
                 }
             }
         
@@ -900,16 +940,70 @@ void task_fn(void* args){
 }
 
 
-void* file_event_handler(void* args){
+void file_event_handler(void* args){
     Session* session = (Session* )args;
-    
+    printf("---debug--- dev \n"); 
     printf("Thread #%d (%u)  Working on session[%ld] \n", session->worker_id , (int)pthread_self(), session->session_iid);
-    
     printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
-     
+    char file_name[100];
+    strncpy(file_name, session->read_buffer + 5, sizeof(session->read_buffer)-1);
 
+    char* value;
+    value = search_hash(session->cluster->filetable, file_name);
+    if (value != NULL){
+        char buf[2048];
+        strcpy(buf, value);
+        send(session->session_iid, buf, sizeof(buf), 0);
+        printf("\t: Cashe Hit::  T[%d] send msg to Session[%ld] \n",session->worker_id ,session->session_iid);
+        return ;
+    }
+
+    else{
+           
+        if (file_io(session->cluster, file_name) ==0){
+
+            value = search_hash(session->cluster->filetable, file_name);
+            if (value != NULL){
+                char buf[2048];
+                strcpy(buf, value);
+                send(session->session_iid, buf, sizeof(buf), 0);
+                printf("\t: Cache Miss::  T[%d] send msg to Session[%ld] \n",session->worker_id ,session->session_iid);
+                return ;
+            }
+        }
+
+        char no_file_msg[1024] = {0};
+        snprintf(no_file_msg, 1024, "<csf>such a file name doesn't exists");
+        send(session->session_iid, no_file_msg, strlen(no_file_msg),0); 
+        printf("\t: NO FILE::  T[%d] send msg to Session[%ld] \n",session->worker_id ,session->session_iid);
+    }
     
 }
+
+
+
+
+void word_count_handler(void* args){
+    Session* session = (Session* )args;
+
+    printf("---debug--- dev \n"); 
+    printf("Thread #%d (%u)  Working on session[%ld] \n", session->worker_id , (int)pthread_self(), session->session_iid);
+    printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
+
+
+
+}
+
+void pre_processing_handler(void* args){
+    Session* session = (Session* )args;
+
+    printf("---debug--- dev \n"); 
+    printf("Thread #%d (%u)  Working on session[%ld] \n", session->worker_id , (int)pthread_self(), session->session_iid);
+    printf("\t: T[%d] recv msg from Session[%ld] ::  %s \n",session->worker_id, session->session_iid,  session->read_buffer);
+
+}
+
+
 
 
 
@@ -929,8 +1023,6 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
 
     return 0;
 }
-
-
 
 
 
@@ -971,7 +1063,6 @@ static int set_event_loop(Cluster* cluster, int epoll_fd, int fd, int max_event)
     }
     return 0;
 }
-
 
 
 
@@ -1044,69 +1135,6 @@ static int async_stream_init(Cluster** cluster_p){
 
 
 
-
-
-
-/*
-   struct File* find_file(char* file_name){
-
-
-   File* file;
-
-   char file_path[1024] = {0};
-   char* hard_path = "./server/book_file/";
-   snprintf(file_path, strlen(hard_path)+1,"%s", hard_path);
-   file = (struct File*)malloc(sizeof(struct File));
-   DIR* os_fd;
-   struct dirent* connector;
-   os_fd = opendir(hard_path);
-
-   if (os_fd==NULL){
-   err("dir does not exists\n");
-   free(file);
-   return NULL;
-   }
-
-
-   while ((connector = readdir(os_fd))!= NULL){
-   char* d_name = connector->d_name;
-   if (strlen(d_name) ==strlen(file_name)){
-   int same=1;
-   for (int i =0; i< strlen(d_name); i++){
-   if (d_name[i]!= file_name[i]){
-   same = 0;
-   break;
-   }
-   }
-   if (same){
-// write
-strcat(file_path, d_name);
-
-FILE* fptr;
-fptr = fopen(file_path, "r");
-
-if(fptr==NULL){
-printf("\t at find file():: fptr error check file path %s \n", file_path);
-break;
-}
-
-fread((file->contents_b), 1, sizeof(file->contents_b), fptr);
-
-snprintf(file->name,50, "%s", d_name);
-file->find = 1;
-fclose(fptr);
-return file;
-}
-}
-}
-
-
-free(file);
-return NULL;
-}
-
-
-*/
 
 
 
@@ -1197,9 +1225,9 @@ static int control_init(Control* control){
      I/O from server/control.txt
      */
     FILE* fptr;
-    //char* root = "./server/control.txt";
-    char* root = "./server/control.private.txt";
-    
+    char* root = "./server/control.txt";
+    // char* root = "./server/control.private.txt";
+    printf("control path (%s) \n", root); 
     fptr = fopen(root, "a+");
     char key[20];
     char value[20];
@@ -1312,6 +1340,7 @@ int main(){
         continue;
 
         }
+
     printf("----Service Stop----");
     return 0;
 }
