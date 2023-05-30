@@ -1,6 +1,5 @@
 A_Scandal_in_Bohemia.txt
 The_Red-Headed_League.txt
-The_Final_Problem.txt
 House_Of_The_Dead.txt
 The_Adventure_of_the_Abbey_Grange.txt
 His_Last_Bow_The_War_Service_of_Sherlock_Holmes.txt
@@ -9,5 +8,3 @@ A_Scandal_in_Bohemia.txt
 The_Red-Headed_League_2.txt
 The_Final_Problem.txt
 House_Of_The_Dead.txt
-The_Adventure_of_the_Abbey_Grange.txt
-Done_with_mass_up.txt
