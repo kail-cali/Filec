@@ -640,8 +640,9 @@ static int connect_init(Connect* connect){
      */
     FILE* fptr;
     char* root = "./client/secret.txt";
-//    char* root = "./client/secrtet.private.txt";
-    
+    // char* root = "./client/secret.private.txt";
+    printf("connect info path (%s) \n", root);
+
     fptr = fopen(root, "a+");
     char key[20];
     char value[20];

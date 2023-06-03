@@ -1,32 +1,35 @@
 # Multiplex-Full-duplex Server on Spark Implementation
 
-`File Transfer Server based on spark architecture`
-`verseion <v2.2.0>`
+`Socket Server based on spark architecture`
+ 
+`verseion <v2.2.3>`
 
 ## Feature
 - MulitPlexing- Non-Blocking Server
 - Full-duplex pipe connections on Pool resources handling
-- Job Sheduleing at server cluster with FIFO
-- Virtualized network and process
+- Job Sheduleing
 
 
 ## API
-- Find File with non-blocking I/O
-- Transfer File
- 
+- Find File and Transfer
+- Word Count (Dev)
+
 
 ## Acrciteture
-- Listen Server with Handler
+- Listen Server
 - Cluster Manager
-⋅ - Job Scheduling(FIFO)
+- - Job Scheduling Handler(FIFO)
+- - Classifiy Jobs Handler
+- - Sub Tasks Handler
+
 
 ## How To Run
 
-- how to compile
+- How to compile
 - at root dir `./FileC`
 `source MakeFile && source MakeClient`
 
-- how to run
+- How to run
 </B>Server
 ```shell
 ./start_server
@@ -43,11 +46,12 @@ IMPORTANT
 - `./server/control.txt'`
 - `./client/secret.txt`
 
-### discrition
 
-- seting into Asyncio or worked on Multiplexing is not same as epoll
-- there is many cases to deal with connections failure, partial read, retires and peer network speed
+## Exception Handling
+`socket worked with asyncio -non blocking, needed to exception handling`
+- timeout :: close socket fd
+- Connection failure:: close socket 
+- Retires :: close socket
+- slow connection :: deal wtih timeout
+- partial read :: caused by I/O error or slow network etc.. deal with terminate session
 
-- current version is having some partial edge -cases events
-⋅ - connection failure cases
-⋅ - Timeout cases
