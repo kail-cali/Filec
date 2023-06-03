@@ -128,6 +128,7 @@ typedef struct Job{
 
 } Job;
 
+
 typedef struct JobScheduler{
 
     int num_lock;
@@ -233,7 +234,9 @@ typedef struct Cluster{
     JobQueue job_queue;
 
 
+
     JobScheduler scheduler;
+
 
     int server_fd;
     struct sockaddr_in serv_addr;
@@ -522,17 +525,16 @@ static void push_back(JobQueue* job_queue, struct Job* new_job){
 
 
 
+
 static void push_back_worker(Worker* worker , struct Job* new_job){
 
     worker->job = new_job;
-
 }
 
 static struct Job* pop_front_worker(Worker* self){
     Job* new_job = self->job;
     return new_job;
 }
-
 
 static struct Job* pop_front(JobQueue* job_queue){
     
@@ -551,8 +553,6 @@ static struct Job* pop_front(JobQueue* job_queue){
     pthread_mutex_unlock(&job_queue->rxmutex);
     return front;
 }
-
-
 
 
 static int pipe_init(Cluster* cluster, int num_worker){
@@ -867,8 +867,16 @@ static void* listen_handler(Cluster* cluster){
 
 
 
+
 static int submit_with_session(Cluster* cluster, void(*function)(void*), void* session_p){
     
+    /*
+     Create session and push job to job-queue
+    
+     - Create job which container for processing query
+     - Create session wihch manage life-cycle of seesion, client fd, read-buffer
+     - Pusch back job (contianer) into queue
+     */
     Job* new_job;
     new_job =(struct Job*)malloc(sizeof(struct Job));
     
@@ -938,6 +946,7 @@ void task_fn(void* args){
 
      //session->read_buffer[0]= '\0';
 }
+
 
 
 void file_event_handler(void* args){
@@ -1023,7 +1032,6 @@ static int job_scheduler_init(JobScheduler* scheduler, int num_lock){
 
     return 0;
 }
-
 
 
 
